@@ -1,0 +1,143 @@
+# Maintainer: msys2-cross project
+_startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_startdir/../../scripts/msys-cross-common.sh"
+inherit_msys2 "mingw-w64-cross-binutils"
+
+# ---- Add our NT weak externals patches ----
+_our_binutils_patches=(
+    0001-Fix-linker-error-when-using-NT-weak-externals.patch
+    0002-Relocate-aux-entries-for-NT-weak-externals.patch
+    0003-Convert-NT-weak-externals-to-locals.patch
+    0004-Resolve-weak-externals-by-name-rather-than-stale-tag.patch
+)
+for p in "${_our_binutils_patches[@]}"; do
+    source+=("file://$_startdir/$p")
+    sha256sums+=('SKIP')
+done
+
+# ---- Package metadata ----
+_our_pkgrel=1
+pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
+
+pkgname=(
+    msys-cross-binutils-common
+    msys-cross-mingw64-binutils
+    msys-cross-mingw32-binutils
+    msys-cross-ucrt64-binutils
+    msys-cross-cygwin-binutils
+)
+arch=('x86_64')
+options=('!strip')
+
+# ---- Target map ----
+declare -A _target_subdir
+_target_subdir[x86_64-w64-mingw32]=mingw64
+_target_subdir[i686-w64-mingw32]=mingw32
+_target_subdir[x86_64-w64-mingw32ucrt]=ucrt64
+_target_subdir[x86_64-pc-cygwin]=usr
+
+_bintools=(addr2line ar as c++filt dlltool dllwrap elfedit gprof ld ld.bfd
+           nm objcopy objdump ranlib readelf size strings strip windmc windres)
+
+# ---- prepare() — MSYS2's 2 patches + our NT weak externals ----
+prepare() {
+    _msys2_prepare
+    cd "${srcdir}/binutils-${pkgver}"
+    apply_patch_with_msg "${_our_binutils_patches[@]}"
+}
+
+# ---- _build_one — configure, libiberty fix, make ----
+_build_one() {
+    local target=$1
+    _build_dir="${srcdir}/binutils-build-${target}"
+
+    mkdir -p "$_build_dir" && cd "$_build_dir"
+
+    local _conf='--enable-lto'
+    if [ "$target" != "i686-w64-mingw32" ]; then
+        _conf+=' --enable-64-bit-bfd'
+    fi
+
+    "${srcdir}/binutils-${pkgver}/configure" \
+        --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target="$target" \
+        --prefix=/ --disable-werror --with-system-zlib \
+        $_conf
+
+    make -j"$(nproc)" all-libiberty
+    ln -sf libiberty.a "$_build_dir/libiberty/libiberty.so"
+    ln -sf libiberty.a "$_build_dir/libiberty/pic/libiberty.so" 2>/dev/null || true
+
+    make -j"$(nproc)"
+}
+
+# ---- build() — 4 targets ----
+build() {
+    setup_zig_env
+    for t in x86_64-w64-mingw32ucrt i686-w64-mingw32 x86_64-w64-mingw32 x86_64-pc-cygwin; do
+        _build_one "$t"
+    done
+}
+
+# ---- _package_one(target, subdir) — install, rearrange, clean ----
+_package_one() {
+    local target=$1 subdir=$2
+    cd "${srcdir}/binutils-build-${target}"
+    make DESTDIR="${pkgdir}" install
+
+    # Move <target>/bin/* and <target>/lib/* into MSYS2-layout subdir
+    if [ -d "${pkgdir}/${target}" ]; then
+        mkdir -p "${pkgdir}/${subdir}"
+        for d in "${pkgdir}/${target}/"*; do
+            [ -e "$d" ] && mv "$d" "${pkgdir}/${subdir}/"
+        done
+        rm -rf "${pkgdir}/${target}"
+    fi
+
+    # Unprefixed symlinks so GCC finds as/ld/etc. under sysroot
+    for tool in "${_bintools[@]}"; do
+        rm -f "${pkgdir}/${subdir}/bin/${tool}"
+        ln -sf "../../bin/${target}-${tool}" "${pkgdir}/${subdir}/bin/${tool}"
+    done
+
+    rm -rf "${pkgdir}/share"
+    find "${pkgdir}" -name "*.exe" -delete
+    rm -rf "${pkgdir}/lib"
+}
+
+package_msys-cross-binutils-common() {
+    pkgdesc="Shared files for msys2-cross binutils (BFD plugins)"
+    depends=(msys-cross-filesystem)
+    cd "${srcdir}/binutils-build-x86_64-w64-mingw32"
+    make DESTDIR="${pkgdir}" install
+    # Keep only lib/bfd-plugins/libdep.so (target-independent)
+    mkdir -p "${pkgdir}-tmp/lib/bfd-plugins"
+    mv "${pkgdir}/lib/bfd-plugins/libdep.so" "${pkgdir}-tmp/lib/bfd-plugins/" 2>/dev/null || true
+    rm -rf "${pkgdir}/"*
+    mkdir -p "$(dirname "${pkgdir}/lib/bfd-plugins/libdep.so")"
+    mv "${pkgdir}-tmp/lib/bfd-plugins/libdep.so" "${pkgdir}/lib/bfd-plugins/"
+    rm -rf "${pkgdir}-tmp"
+}
+
+package_msys-cross-mingw64-binutils() {
+    pkgdesc="Cross binutils for x86_64-w64-mingw32 target"
+    depends=(msys-cross-filesystem "msys-cross-binutils-common=${pkgver}-${pkgrel}")
+    _package_one "x86_64-w64-mingw32" "mingw64"
+}
+
+package_msys-cross-mingw32-binutils() {
+    pkgdesc="Cross binutils for i686-w64-mingw32 target"
+    depends=(msys-cross-filesystem "msys-cross-binutils-common=${pkgver}-${pkgrel}")
+    _package_one "i686-w64-mingw32" "mingw32"
+}
+
+package_msys-cross-ucrt64-binutils() {
+    pkgdesc="Cross binutils for x86_64-w64-mingw32ucrt target"
+    depends=(msys-cross-filesystem "msys-cross-binutils-common=${pkgver}-${pkgrel}")
+    _package_one "x86_64-w64-mingw32ucrt" "ucrt64"
+}
+
+package_msys-cross-cygwin-binutils() {
+    pkgdesc="Cross binutils for x86_64-pc-cygwin target"
+    depends=(msys-cross-filesystem "msys-cross-binutils-common=${pkgver}-${pkgrel}")
+    _package_one "x86_64-pc-cygwin" "usr"
+}

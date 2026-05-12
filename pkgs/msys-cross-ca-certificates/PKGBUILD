@@ -1,0 +1,14 @@
+# Maintainer: msys2-cross project
+pkgname=msys-cross-ca-certificates
+pkgver=20260510
+pkgrel=1
+pkgdesc="Mozilla CA certificate bundle for msys2-cross (from curl.se/ca/cacert.pem)"
+arch=('any')
+options=('!strip')
+source=('https://curl.se/ca/cacert.pem')
+sha256sums=('SKIP')
+
+package() {
+    mkdir -p "$pkgdir/etc/ssl/certs"
+    cp "$srcdir/cacert.pem" "$pkgdir/etc/ssl/certs/ca-certificates.crt"
+}

@@ -1,0 +1,159 @@
+# Maintainer: msys2-cross project
+_startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_startdir/../../scripts/msys-cross-common.sh"
+inherit_msys2 "gcc"
+
+# MSYS2 gcc PKGBUILD uses pkgbase=gcc, no _realname=
+_realname=gcc
+
+# ---- Transform MSYS2 native build() → cross compiler via sed ----
+# MSYS2 builds natively (host=target=x86_64-pc-cygwin).
+# We sed it into a cross-compiler (host=x86_64-linux-gnu, target=x86_64-pc-cygwin).
+# Uses prefix+symlink pattern (like build_gcc.sh): no --with-sysroot,
+# xgcc finds headers/libs at $prefix/$target/ → $_bootstrap_prefix/usr/.
+eval "$(declare -f _msys2_build | sed \
+    -e 's|build-MSYS|gcc-build-x86_64-pc-cygwin|g' \
+    -e 's|gcc-\${pkgver}|${_realname}-\${pkgver}|g' \
+    -e '/case \${CARCH}/,/esac;/c\  _arch=nocona;' \
+    -e '/if check_option.*debug/,/fi;/d' \
+    -e '/CFLAGS=\${CFLAGS\/-pipe\/}/d' \
+    -e '/CXXFLAGS=\${CXXFLAGS\/-pipe\/}/d' \
+    -e "/export lt_cv_deplibs_check_method='pass_all'/d" \
+    -e '/export MSYSTEM=CYGWIN/d' \
+    -e 's|--build=\${CHOST}|--build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=x86_64-pc-cygwin|' \
+    -e 's|--prefix=/usr|--prefix="${_stage_prefix}"|' \
+    -e 's|--libexecdir=/usr/lib|--libexecdir="${_stage_prefix}/libexec"|' \
+    -e 's|--enable-bootstrap|--disable-bootstrap|' \
+    -e 's|--enable-shared-libgcc|--disable-shared-libgcc|' \
+    -e 's|--enable-libatomic|--disable-libatomic|' \
+    -e 's|--enable-libgomp|--disable-libgomp|' \
+    -e 's|--disable-libitm||' \
+    -e 's|--enable-libquadmath-support||' \
+    -e 's|--enable-libquadmath ||' \
+    -e 's|--without-libiconv-prefix|--with-libiconv|' \
+    -e 's|--without-libintl-prefix||' \
+    -e 's|--enable-linker-build-id||' \
+    -e 's|\${_arch_conf} ||' \
+    -e 's|--enable-libstdcxx-filesystem-ts;|--enable-libstdcxx-filesystem-ts --with-gmp=\"'"$_deps"'\" --with-mpfr=\"'"$_deps"'\" --with-mpc=\"'"$_deps"'\" --with-isl=\"'"$_deps"'\" --disable-libcc1 --disable-rpath --disable-werror --enable-lto --enable-fully-dynamic-string --enable-cloog-backend=isl;|' \
+    -e 's|  | |g' \
+    -e 's|\bmake$|make -j"$(nproc)"|')"
+
+# ---- Package metadata ----
+_our_pkgrel=1
+pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
+
+pkgname=(msys-cross-cygwin-gcc)
+arch=('x86_64')
+options=('!strip')
+
+# ---- Extra chimera patches ----
+_chimera_patches=(
+    clang-tree-vect.patch
+    0010-Don-t-declare-asprintf-if-defined-as-a-macro.patch
+    0011-libiberty-copy-PIC-objects-during-build-process.patch
+    0015-build-fix-CXXFLAGS_FOR_BUILD-passing.patch
+)
+for p in "${_chimera_patches[@]}"; do
+    source+=("file://$_startdir/$p")
+    sha256sums+=('SKIP')
+done
+
+# ---- Override: make patching tolerant ----
+apply_patch_with_msg() {
+    for _fname in "$@"; do
+        msg2 "Applying ${_fname}"
+        patch -Nbp1 -i "${srcdir}"/${_fname} || true
+    done
+}
+
+# ---- prepare() — MSYS2's + chimera + cygwin fix ----
+prepare() {
+    _msys2_prepare
+    cd "${srcdir}/${_realname}-${pkgver}"
+    apply_patch_with_msg "${_chimera_patches[@]}"
+    sed -i 's/#define abort() __builtin_trap ()/extern void abort(void) __attribute__((__noreturn__));/' \
+        gcc/tsystem.h
+    # Cross-compiling cygwin: libgcc_s.dll link needs _msys_dll_entry
+    # and __pthread_normal_mutex_initializer_np, which only resolve
+    # with the actual msys-2.0.dll at runtime.  Replace the SHLIB_LINK
+    # rule with a stub that copies libgcc.a -> libgcc_s.a so that
+    # -lgcc_s works for libquadmath/libstdc++ linking.
+    # Replace SHLIB_LINK + SHLIB_INSTALL, keep SHLIB_MKMAP intact.
+    sed -i '/^SHLIB_LINK = /,/^SHLIB_MKMAP = /c\
+SHLIB_LINK = \\\n\tif [ ! -d $(SHLIB_DIR) ]; then mkdir $(SHLIB_DIR); else true; fi; \\\n\tcp libgcc.a $(SHLIB_DIR)/libgcc_combined.a; \\\n\t(if [ -f libgcc_eh.a ]; then cd $(SHLIB_DIR) && ar x ../libgcc_eh.a && ar q libgcc_combined.a *.o && rm -f *.o && cd ..; fi); \\\n\tcp $(SHLIB_DIR)/libgcc_combined.a $(SHLIB_DIR)/$(SHLIB_IMPLIB) 2>/dev/null || true; \\\n\tcp $(SHLIB_DIR)/libgcc_combined.a ../../gcc/libgcc_s.a 2>/dev/null || true; \\\n\ttrue\
+SHLIB_INSTALL = \\\n\t$(INSTALL_DATA) $(SHLIB_DIR)/libgcc_combined.a $(DESTDIR)$(inst_libdir)/libgcc_s.a\
+SHLIB_MKMAP = $(srcdir)/mkmap-flat.awk' \
+        libgcc/config/i386/t-slibgcc-cygming
+}
+
+# ---- build() — build_gcc.sh pattern: prefix + target symlink, no --with-sysroot ----
+build() {
+    setup_zig_env
+    ln -sf $_bootstrap_prefix/usr "${srcdir}/winsup"
+    # MSYS2 provides libmsys-2.0.a; GCC/cygwin expects -lcygwin
+    ln -sf libmsys-2.0.a "$_bootstrap_prefix/usr/lib/libcygwin.a"
+
+    _stage_prefix="${srcdir}/stage"
+    mkdir -p "$_stage_prefix"
+    rm -rf "$_stage_prefix/x86_64-pc-cygwin"
+
+    # Selective symlink (NOT entire $_bootstrap_prefix/usr):
+    # -B.../bin/ adds -L.../bin to ld search path. If bin contains
+    # msys-2.0.dll, ld finds the DLL (which lacks crt symbols) before
+    # libmsys-2.0.a, causing undefined refs to cygwin_premain0 etc.
+    mkdir -p "$_stage_prefix/x86_64-pc-cygwin"
+    ln -sf $_bootstrap_prefix/usr/lib "$_stage_prefix/x86_64-pc-cygwin/lib"
+    ln -sf $_bootstrap_prefix/usr/include "$_stage_prefix/x86_64-pc-cygwin/include"
+    mkdir -p "$_stage_prefix/x86_64-pc-cygwin/bin"
+    for _tool in ar as ld nm objcopy objdump ranlib readelf strip \
+                 dlltool dllwrap windres windmc addr2line c++filt \
+                 elfedit gprof size strings; do
+        ln -sf "$_install_prefix/bin/x86_64-pc-cygwin-${_tool}" \
+              "$_stage_prefix/x86_64-pc-cygwin/bin/${_tool}"
+    done
+
+    # w32api libraries (advapi32, kernel32, etc.) live in usr/lib/w32api/
+    # but ld only searches usr/lib/.  Symlink them so -ladvapi32 resolves.
+    for _a in "$_bootstrap_prefix/usr/lib/w32api/"*.a; do
+        ln -sf "w32api/$(basename "$_a")" "$_bootstrap_prefix/usr/lib/$(basename "$_a")" 2>/dev/null || true
+    done
+
+    _msys2_build
+}
+
+# ---- _package_one — install + move from stage prefix to pkg root ----
+_package_one() {
+    local target=$1
+    cd "${srcdir}/gcc-build-${target}"
+    make -j1 DESTDIR="${pkgdir}" install
+
+    local _pfx="${_stage_prefix:-${srcdir}/stage}"
+    local _staged="${pkgdir}${_pfx}"
+    if [ -d "$_staged" ]; then
+        for _d in bin lib libexec share; do
+            [ -e "$_staged/$_d" ] && mv "$_staged/$_d" "${pkgdir}/"
+        done
+        rm -rf "$_staged/$target"
+        rm -rf "${pkgdir}/home"
+    fi
+
+    rm -rf "${pkgdir}/share"
+    find "${pkgdir}" -name "*.exe" -delete
+    # Ensure -lgcc_s resolves. For cygwin, SHLIB_INSTALL installs libgcc_s.a
+    # to the versioned dir; move it to top-level lib/ and symlink back.
+    # Fallback: symlink to libgcc.a (which always exists).
+    local _verlib="${pkgdir}/lib/gcc/${target}/${pkgver}"
+    if [ -f "$_verlib/libgcc_s.a" ] && [ ! -L "$_verlib/libgcc_s.a" ]; then
+        mv "$_verlib/libgcc_s.a" "${pkgdir}/lib/libgcc_s.a"
+        ln -sf ../../../libgcc_s.a "$_verlib/libgcc_s.a"
+    elif [ ! -f "$_verlib/libgcc_s.a" ] && [ -f "$_verlib/libgcc.a" ]; then
+        ln -sf libgcc.a "$_verlib/libgcc_s.a"
+    fi
+}
+
+package_msys-cross-cygwin-gcc() {
+    pkgdesc="Cross GCC for x86_64-pc-cygwin target (gcc/g++)"
+    depends=(msys-cross-filesystem msys-cross-cygwin-binutils
+             msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime)
+    _package_one "x86_64-pc-cygwin"
+}

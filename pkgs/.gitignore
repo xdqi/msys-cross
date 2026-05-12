@@ -1,0 +1,20 @@
+# Build artifacts (makepkg)
+src/
+pkg/
+work/
+
+# Built packages
+*.pkg.tar
+*.pkg.tar.gz
+*.pkg.tar.zst
+*.pkg.tar.xz
+
+# Downloaded sources (tarballs, signatures)
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.tar.xz.sig
+*.tar.gz.sig
+
+# Downloaded resources
+*.crt

@@ -1,0 +1,11 @@
+#!/bin/sh
+# msys-pacman — relocatable pacman-static wrapper for msys2-cross toolchain
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+export CURL_CA_BUNDLE="$PREFIX/etc/ssl/certs/ca-certificates.crt"
+exec "$PREFIX/libexec/pacman-static" \
+    --root="$PREFIX" \
+    --config="$PREFIX/etc/pacman.d/pacman.conf" \
+    --dbpath="$PREFIX/var/lib/pacman" \
+    "$@"

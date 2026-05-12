@@ -1,0 +1,148 @@
+# Maintainer: msys2-cross project
+_startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_startdir/../../scripts/msys-cross-common.sh"
+inherit_msys2 "mingw-w64-cross-gcc"
+
+# ---- Fix _build() to match build_gcc.sh configure line-for-line ----
+# Uses _stage_prefix variable (set in build()) instead of hardcoded prefix,
+# so we can create per-target sysroot symlinks under it (like build_gcc.sh NEWBIN).
+eval "$(declare -f _build | sed \
+    -e 's|--prefix=/opt|--prefix="${_stage_prefix}"|g' \
+    -e 's|--libexecdir=/opt/lib|--libexecdir="${_stage_prefix}/libexec"|g' \
+    -e 's|\${CHOST}|x86_64-linux-gnu|g' \
+    -e 's|--with-{gmp,mpfr,mpc,isl}=/usr|--with-gmp='"$_deps"' --with-mpfr='"$_deps"' --with-mpc='"$_deps"' --with-isl='"$_deps"'|g' \
+    -e 's|--enable-libgomp|--disable-libcc1 --enable-libgomp|g' \
+    -e 's| fortran|,fortran|g' \
+    -e '/export lt_cv_deplibs_check_method/d' \
+    -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
+    -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
+    -e 's|\bmake all\b|make -j"$(nproc)"|g')"
+
+# ---- Package metadata ----
+_our_pkgrel=1
+pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
+
+pkgname=(
+    msys-cross-mingw64-gcc
+    msys-cross-mingw32-gcc
+    msys-cross-ucrt64-gcc
+)
+arch=('x86_64')
+options=('!strip')
+
+# ---- Extra chimera patches ----
+_chimera_patches=(
+    clang-tree-vect.patch
+    0010-Don-t-declare-asprintf-if-defined-as-a-macro.patch
+    0011-libiberty-copy-PIC-objects-during-build-process.patch
+    0015-build-fix-CXXFLAGS_FOR_BUILD-passing.patch
+)
+for p in "${_chimera_patches[@]}"; do
+    source+=("file://$_startdir/$p")
+    sha256sums+=('SKIP')
+done
+
+# ---- Override: make patching tolerant (GCC 15.2.0 may already have some files) ----
+apply_patch_with_msg() {
+    for _fname in "$@"; do
+        msg2 "Applying ${_fname}"
+        patch -Nbp1 -i "${srcdir}"/${_fname} || true
+    done
+}
+
+# ---- Target map ----
+declare -A _target_subdir
+_target_subdir[x86_64-w64-mingw32]=mingw64
+_target_subdir[i686-w64-mingw32]=mingw32
+_target_subdir[x86_64-w64-mingw32ucrt]=ucrt64
+
+# ---- prepare() — MSYS2's + chimera ----
+prepare() {
+    _msys2_prepare
+    cd "${srcdir}/${_realname}-${pkgver}"
+    apply_patch_with_msg "${_chimera_patches[@]}"
+}
+
+# ---- build() — set up stage prefix (like build_gcc.sh NEWBIN), then MSYS2 loop ----
+build() {
+    setup_zig_env
+
+    # Stage prefix: like build_gcc.sh $NEWBIN — a writable directory where we
+    # create <target> → MSYS2 sysroot symlinks before make.
+    _stage_prefix="${srcdir}/stage"
+    mkdir -p "$_stage_prefix"
+
+    # Per-target sysroot symlinks (xgcc needs headers/CRT for target libs)
+    for _t in x86_64-w64-mingw32 i686-w64-mingw32 x86_64-w64-mingw32ucrt; do
+        case "$_t" in
+            x86_64-w64-mingw32ucrt) _sub=ucrt64 ;;
+            i686*)                  _sub=mingw32 ;;
+            x86_64*)                _sub=mingw64 ;;
+        esac
+        rm -rf "$_stage_prefix/$_t"
+        ln -sf "$_bootstrap_prefix/$_sub" "$_stage_prefix/$_t"
+    done
+
+    _msys2_build
+}
+
+# ---- _package_one — install + cleanup ----
+# Like build_gcc.sh, we configured with a staging prefix. DESTDIR install
+# puts files at ${pkgdir}${_stage_prefix}/... — move them to ${pkgdir}/.
+_package_one() {
+    local target=$1
+    cd "${srcdir}/gcc-build-${target}"
+    make -j1 DESTDIR="${pkgdir}" install
+
+    local _pfx="${_stage_prefix:-${srcdir}/stage}"
+    local _staged="${pkgdir}${_pfx}"
+    if [ -d "$_staged" ]; then
+        for _d in bin lib libexec share; do
+            [ -e "$_staged/$_d" ] && mv "$_staged/$_d" "${pkgdir}/"
+        done
+        # Target libs (libstdc++, libgcc_s, crt, etc.) come from MSYS2 native packages
+        rm -rf "$_staged/$target"
+        # Remove the empty stage prefix hierarchy (pkgdir/home/...)
+        rm -rf "${pkgdir}/home"
+    fi
+
+    rm -rf "${pkgdir}/share"
+    find "${pkgdir}" -name "*.exe" -delete
+
+    # Ensure -lgcc_s resolves. GCC make install produces libgcc.a (static)
+    # but not always libgcc_s.a; ld needs both since GCC links with -lgcc_s -lgcc.
+    local _verlib="${pkgdir}/lib/gcc/${target}/${pkgver}"
+    if [ -f "$_verlib/libgcc_s.a" ] && [ ! -L "$_verlib/libgcc_s.a" ]; then
+        mv "$_verlib/libgcc_s.a" "${pkgdir}/lib/libgcc_s.a"
+        ln -sf ../../../libgcc_s.a "$_verlib/libgcc_s.a"
+    elif [ ! -f "$_verlib/libgcc_s.a" ] && [ -f "$_verlib/libgcc.a" ]; then
+        ln -sf libgcc.a "$_verlib/libgcc_s.a"
+    fi
+}
+
+package_msys-cross-mingw64-gcc() {
+    pkgdesc="Cross GCC for x86_64-w64-mingw32 target (gcc/g++/gfortran)"
+    depends=(msys-cross-filesystem msys-cross-mingw64-binutils
+             mingw-w64-x86_64-headers mingw-w64-x86_64-crt
+             mingw-w64-x86_64-winpthreads mingw-w64-x86_64-gcc-libs
+             mingw-w64-x86_64-zlib mingw-w64-x86_64-windows-default-manifest)
+    _package_one "x86_64-w64-mingw32"
+}
+
+package_msys-cross-mingw32-gcc() {
+    pkgdesc="Cross GCC for i686-w64-mingw32 target (gcc/g++/gfortran)"
+    depends=(msys-cross-filesystem msys-cross-mingw32-binutils
+             mingw-w64-i686-headers mingw-w64-i686-crt
+             mingw-w64-i686-winpthreads mingw-w64-i686-gcc-libs
+             mingw-w64-i686-zlib mingw-w64-i686-windows-default-manifest)
+    _package_one "i686-w64-mingw32"
+}
+
+package_msys-cross-ucrt64-gcc() {
+    pkgdesc="Cross GCC for x86_64-w64-mingw32ucrt target (gcc/g++/gfortran)"
+    depends=(msys-cross-filesystem msys-cross-ucrt64-binutils
+             mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt
+             mingw-w64-ucrt-x86_64-winpthreads mingw-w64-ucrt-x86_64-gcc-libs
+             mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-windows-default-manifest)
+    _package_one "x86_64-w64-mingw32ucrt"
+}

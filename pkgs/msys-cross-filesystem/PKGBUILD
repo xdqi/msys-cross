@@ -1,0 +1,22 @@
+# Maintainer: msys2-cross project
+pkgname=msys-cross-filesystem
+pkgver=1.0
+pkgrel=2
+pkgdesc="Base filesystem skeleton and triple symlinks for msys2-cross toolchain"
+arch=('x86_64')
+options=('!strip')
+
+package() {
+    # Top-level target-sysroot symlinks (GCC sysroot auto-detection)
+    # and empty subdirectory roots.  The bin/ dirs are created by
+    # msys-cross-binutils (cross symlinks) so we don't duplicate.
+    mkdir -p "$pkgdir/mingw64"
+    mkdir -p "$pkgdir/mingw32"
+    mkdir -p "$pkgdir/ucrt64"
+    mkdir -p "$pkgdir/usr"
+
+    ln -sf mingw64/ "$pkgdir/x86_64-w64-mingw32"
+    ln -sf mingw32/ "$pkgdir/i686-w64-mingw32"
+    ln -sf ucrt64/   "$pkgdir/x86_64-w64-mingw32ucrt"
+    ln -sf usr/      "$pkgdir/x86_64-pc-cygwin"
+}

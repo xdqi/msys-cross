@@ -1,0 +1,23 @@
+# Maintainer: msys2-cross project
+_startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pkgname=msys-cross-pacman
+pkgver=6.0.1
+pkgrel=1
+pkgdesc="pacman-static and wrapper script for msys2-cross bootstrap"
+arch=('x86_64')
+options=('!strip')
+depends=('msys-cross-filesystem' 'msys-cross-ca-certificates')
+backup=('etc/pacman.d/pacman.conf')
+
+source=("pacman-static"
+        "pacman.conf"
+        "msys-pacman")
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+    mkdir -p "$pkgdir/bin" "$pkgdir/libexec" "$pkgdir/etc/pacman.d"
+
+    install -m755 "$srcdir/msys-pacman" "$pkgdir/bin/msys-pacman"
+    install -m755 "$srcdir/pacman-static" "$pkgdir/libexec/pacman-static"
+    install -m644 "$srcdir/pacman.conf" "$pkgdir/etc/pacman.d/pacman.conf"
+}
