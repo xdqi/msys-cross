@@ -46,6 +46,12 @@ inherit_msys2() {
     makedepends=()
     validpgpkeys=()
 
+    # Skip all sha256sum checks — MSYS2 patches in the submodule may be
+    # modified/rebased between checkouts, making checksums mismatch.
+    for i in "${!sha256sums[@]}"; do
+        sha256sums[$i]='SKIP'
+    done
+
     # --- fix source[]: relative patches → file:// (makepkg ignores bare abs paths) ---
     for i in "${!source[@]}"; do
         case "${source[$i]}" in
