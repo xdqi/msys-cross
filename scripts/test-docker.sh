@@ -9,7 +9,7 @@ TOOLCHAIN="${2:?}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$PROJECT_ROOT/repo"
-BOOTSTRAP_DIR="$PROJECT_ROOT/bootstrap"
+INSTALLER_DIR="$PROJECT_ROOT/installer"
 DOCKER_NAME="msys2-cross-${DISTRO}-${TOOLCHAIN}"
 
 # ---- Toolchain map ----
@@ -68,11 +68,11 @@ docker rm -f "$DOCKER_NAME" 2>/dev/null || true
 
 docker run -d --name "$DOCKER_NAME" \
     -v "$REPO_DIR:/repo:ro" \
-    -v "$BOOTSTRAP_DIR:/bootstrap:ro" \
+    -v "$INSTALLER_DIR:/installer:ro" \
     "$DOCKER_IMAGE" \
     sleep infinity
 
-docker cp "$BOOTSTRAP_DIR"/. "$DOCKER_NAME:/opt/msys2-cross/"
+docker cp "$INSTALLER_DIR"/. "$DOCKER_NAME:/opt/msys2-cross/"
 docker exec "$DOCKER_NAME" chmod +x /opt/msys2-cross/libexec/pacman-static /opt/msys2-cross/bin/msys-pacman
 
 docker exec "$DOCKER_NAME" bash -c "

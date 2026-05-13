@@ -148,6 +148,12 @@ for pkg in "$PKGDEST"/*.pkg.tar.*; do
     repo-add "$PKGDEST/msys-cross.db.tar.gz" "$pkg"
 done
 
+# ---- Step 6: Build installer ----
+echo ""
+echo "===== Step 6: Build installer ====="
+export INSTALLER_DIR="${INSTALLER_DIR:-$PROJECT_ROOT/installer}"
+bash "$SCRIPTS_DIR/build_installer.sh"
+
 echo ""
 echo "===== Build complete ====="
 echo "Repo: $PKGDEST"
