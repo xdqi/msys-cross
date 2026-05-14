@@ -1,0 +1,13 @@
+# clangarm64 cross-compilation config (msys2-cross)
+--target=aarch64-w64-mingw32
+--sysroot=<CFGDIR>/../../clangarm64
+-fuse-ld=lld
+-rtlib=compiler-rt
+-stdlib=libc++
+-unwindlib=libunwind
+-D_UCRT
+-Wno-unused-command-line-argument
+-resource-dir=<CFGDIR>/../../clangarm64/lib/clang/@SYSROOT_LLVM_VER@
+# Host clang's intrinsics headers as fallback only
+-idirafter
+@HOST_RESOURCE_DIR@/include

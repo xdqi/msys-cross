@@ -1,0 +1,16 @@
+# clang64 cross-compilation config (msys2-cross)
+# <CFGDIR> expands to the directory of this cfg file at runtime.
+--target=x86_64-w64-mingw32
+--sysroot=<CFGDIR>/../../clang64
+-fuse-ld=lld
+-rtlib=compiler-rt
+-stdlib=libc++
+-unwindlib=libunwind
+-D_UCRT
+-Wno-unused-command-line-argument
+# Sysroot compiler-rt builtins (LLVM @SYSROOT_LLVM_VER@; ABI-stable C runtime)
+-resource-dir=<CFGDIR>/../../clang64/lib/clang/@SYSROOT_LLVM_VER@
+# Host clang's intrinsics headers (mm_malloc.h, immintrin.h, ...) as fallback only,
+# so libc++ and sysroot libc headers (e.g. stddef.h) take precedence.
+-idirafter
+@HOST_RESOURCE_DIR@/include

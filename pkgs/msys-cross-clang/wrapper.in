@@ -1,0 +1,97 @@
+#!/bin/sh
+# msys-cross-clang wrapper
+# Dispatches to host clang/lld/llvm-* based on argv[0].
+# @CLANG_BIN@, @LLD_BIN@, @LLVM_TOOLDIR@ get filled by configure-host.
+set -e
+
+SELF="${0##*/}"
+# $0 is the bin/<msystem>-<tool> symlink; PREFIX is its parent's parent.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="$(cd "$HERE/.." && pwd)"
+
+# Parse "<msystem>-<tool>" or "<chost>-clang[++]"
+case "$SELF" in
+    clang64-*)
+        MSYSTEM=clang64
+        TOOL="${SELF#clang64-}"
+        ;;
+    clangarm64-*)
+        MSYSTEM=clangarm64
+        TOOL="${SELF#clangarm64-}"
+        ;;
+    x86_64-w64-mingw32-clang++)
+        MSYSTEM=clang64; TOOL=clang++ ;;
+    x86_64-w64-mingw32-clang)
+        MSYSTEM=clang64; TOOL=clang ;;
+    aarch64-w64-mingw32-clang++)
+        MSYSTEM=clangarm64; TOOL=clang++ ;;
+    aarch64-w64-mingw32-clang)
+        MSYSTEM=clangarm64; TOOL=clang ;;
+    *)
+        echo "msys-cross-clang wrapper: unknown invocation '$SELF'" >&2
+        exit 1
+        ;;
+esac
+
+CFG="$PREFIX/etc/clang/$MSYSTEM.cfg"
+
+# Substituted by configure-host:
+CLANG_BIN="@CLANG_BIN@"
+LLD_BIN="@LLD_BIN@"
+LLVM_TOOLDIR="@LLVM_TOOLDIR@"
+LLVM_SUFFIX="@LLVM_SUFFIX@"
+
+if [ ! -r "$CFG" ]; then
+    echo "msys-cross-clang: missing config $CFG; run 'msys-cross-clang-configure $MSYSTEM'" >&2
+    exit 1
+fi
+
+llvm_tool() {
+    # $1: base name like 'ar', 'strip'
+    local t="$LLVM_TOOLDIR/llvm-$1$LLVM_SUFFIX"
+    if [ -x "$t" ]; then
+        exec "$t" "$@"
+    fi
+    # Fallback to PATH
+    t="$(command -v "llvm-$1$LLVM_SUFFIX" || command -v "llvm-$1" || true)"
+    if [ -n "$t" ]; then
+        shift
+        exec "$t" "$@"
+    fi
+    echo "msys-cross-clang: llvm-$1 not found" >&2
+    exit 1
+}
+
+case "$TOOL" in
+    clang|cc)
+        exec "$CLANG_BIN" --config "$CFG" "$@"
+        ;;
+    clang++|c++|cpp)
+        exec "$CLANG_BIN" --config "$CFG" --driver-mode=g++ "$@"
+        ;;
+    as)
+        # gas-style assembler; clang -c -x assembler is the closest match
+        exec "$CLANG_BIN" --config "$CFG" -c -x assembler "$@"
+        ;;
+    ld)
+        # lld picks MinGW flavor automatically via -m i386pep/i386pe in driver use.
+        # When called as $msystem-ld directly, force MinGW via -flavor gnu and rely on
+        # caller supplying -m. End users normally go through the driver.
+        exec "$LLD_BIN" -flavor gnu "$@"
+        ;;
+    ar)        llvm_tool ar        "$@" ;;
+    ranlib)    llvm_tool ranlib    "$@" ;;
+    strip)     llvm_tool strip     "$@" ;;
+    nm)        llvm_tool nm        "$@" ;;
+    objdump)   llvm_tool objdump   "$@" ;;
+    objcopy)   llvm_tool objcopy   "$@" ;;
+    readobj|readelf)
+               llvm_tool readobj   "$@" ;;
+    dlltool)   llvm_tool dlltool   "$@" ;;
+    windres)   llvm_tool windres   "$@" ;;
+    rc)        llvm_tool rc        "$@" ;;
+    *)
+        echo "msys-cross-clang wrapper: unknown tool '$TOOL'" >&2
+        exit 1
+        ;;
+esac

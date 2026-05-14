@@ -1,0 +1,92 @@
+# Maintainer: msys2-cross project
+_startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+pkgbase=msys-cross-clang
+pkgname=(
+    msys-cross-clang-common
+    msys-cross-clang64
+    msys-cross-clangarm64
+)
+pkgver=1.0
+pkgrel=1
+arch=('x86_64')
+options=('!strip')
+url='https://github.com/'
+
+source=(
+    'wrapper.in'
+    'configure-host.in'
+    'clang64.cfg.in'
+    'clangarm64.cfg.in'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+# Tools dispatched by wrapper.in (must match its case-statement)
+_tools=(clang clang++ cc c++ cpp as ld ar ranlib strip nm objdump objcopy readobj dlltool windres rc)
+
+_install_common_files() {
+    install -d "$pkgdir/libexec/msys-cross-clang"
+    install -m644 "$srcdir/wrapper.in"        "$pkgdir/libexec/msys-cross-clang/wrapper.in"
+    install -m755 "$srcdir/configure-host.in" "$pkgdir/libexec/msys-cross-clang/configure-host"
+
+    install -d "$pkgdir/bin"
+    ln -sf ../libexec/msys-cross-clang/configure-host "$pkgdir/bin/msys-cross-clang-configure"
+}
+
+_install_target_symlinks() {
+    # $1: msystem (clang64 / clangarm64)
+    # $2: chost   (x86_64-w64-mingw32 / aarch64-w64-mingw32)
+    local msystem=$1 chost=$2
+    install -d "$pkgdir/bin"
+    for t in "${_tools[@]}"; do
+        ln -sf ../libexec/msys-cross-clang/wrapper "$pkgdir/bin/${msystem}-${t}"
+    done
+    # Cross-compiler chost-prefixed aliases (matches autotools' AC_CHECK_TOOL).
+    ln -sf "${msystem}-clang"   "$pkgdir/bin/${chost}-clang"
+    ln -sf "${msystem}-clang++" "$pkgdir/bin/${chost}-clang++"
+}
+
+_install_cfg_template() {
+    # $1: msystem
+    install -d "$pkgdir/etc/clang"
+    install -m644 "$srcdir/$1.cfg.in" "$pkgdir/etc/clang/$1.cfg.in"
+}
+
+package_msys-cross-clang-common() {
+    pkgdesc="Common runtime for msys-cross-clang* (wrapper + configure-host)"
+    depends=('msys-cross-filesystem')
+    _install_common_files
+}
+
+package_msys-cross-clang64() {
+    pkgdesc="Cross-compile to x86_64-w64-mingw32 (clang64) using host clang/lld"
+    depends=(
+        "msys-cross-clang-common=${pkgver}-${pkgrel}"
+        # MSYS2 sysroot bits (installed under $PREFIX/clang64/...)
+        'mingw-w64-clang-x86_64-headers-git'
+        'mingw-w64-clang-x86_64-crt-git'
+        'mingw-w64-clang-x86_64-compiler-rt'
+        'mingw-w64-clang-x86_64-libc++'
+        'mingw-w64-clang-x86_64-libunwind'
+        'mingw-w64-clang-x86_64-winpthreads-git'
+    )
+    install=msys-cross-clang64.install
+    _install_target_symlinks clang64 x86_64-w64-mingw32
+    _install_cfg_template    clang64
+}
+
+package_msys-cross-clangarm64() {
+    pkgdesc="Cross-compile to aarch64-w64-mingw32 (clangarm64) using host clang/lld"
+    depends=(
+        "msys-cross-clang-common=${pkgver}-${pkgrel}"
+        'mingw-w64-clang-aarch64-headers-git'
+        'mingw-w64-clang-aarch64-crt-git'
+        'mingw-w64-clang-aarch64-compiler-rt'
+        'mingw-w64-clang-aarch64-libc++'
+        'mingw-w64-clang-aarch64-libunwind'
+        'mingw-w64-clang-aarch64-winpthreads-git'
+    )
+    install=msys-cross-clangarm64.install
+    _install_target_symlinks clangarm64 aarch64-w64-mingw32
+    _install_cfg_template    clangarm64
+}
