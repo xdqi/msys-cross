@@ -4,8 +4,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 export CURL_CA_BUNDLE="$PREFIX/etc/ssl/certs/ca-certificates.crt"
-exec "$PREFIX/libexec/pacman-static" \
-    --root="$PREFIX" \
-    --config="$PREFIX/etc/pacman.d/pacman.conf" \
-    --dbpath="$PREFIX/var/lib/pacman" \
-    "$@"
+
+if [ "$(id -u)" != "0" ] && command -v fakeroot >/dev/null 2>&1; then
+    exec fakeroot "$PREFIX/libexec/pacman-static" \
+        --root="$PREFIX" \
+        --config="$PREFIX/etc/pacman.d/pacman.conf" \
+        --dbpath="$PREFIX/var/lib/pacman" \
+        "$@"
+else
+    exec "$PREFIX/libexec/pacman-static" \
+        --root="$PREFIX" \
+        --config="$PREFIX/etc/pacman.d/pacman.conf" \
+        --dbpath="$PREFIX/var/lib/pacman" \
+        "$@"
+fi
