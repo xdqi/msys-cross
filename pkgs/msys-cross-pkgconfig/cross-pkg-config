@@ -1,0 +1,22 @@
+#!/bin/sh
+# cross-pkg-config — relocatable pkg-config wrapper for msys2-cross
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+_target="${0##*/}"
+_target="${_target%-pkg-config}"
+
+case "$_target" in
+    x86_64-w64-mingw32)        _sysroot="$PREFIX/mingw64" ;;
+    i686-w64-mingw32)          _sysroot="$PREFIX/mingw32" ;;
+    x86_64-w64-mingw32ucrt)    _sysroot="$PREFIX/ucrt64" ;;
+    x86_64-pc-cygwin)          _sysroot="$PREFIX/usr" ;;
+    clang64)                   _sysroot="$PREFIX/clang64" ;;
+    clangarm64|aarch64-w64-mingw32)
+                               _sysroot="$PREFIX/clangarm64" ;;
+    *) echo "Unknown target: $_target" >&2; exit 1 ;;
+esac
+
+export PKG_CONFIG_SYSROOT_DIR="$_sysroot"
+export PKG_CONFIG_PATH="$_sysroot/lib/pkgconfig:$_sysroot/share/pkgconfig"
+exec pkg-config "$@"

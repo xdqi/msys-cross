@@ -1,0 +1,32 @@
+# Maintainer: msys2-cross project
+_startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pkgname=msys-cross-pkgconfig
+pkgver=1.0
+pkgrel=1
+pkgdesc="Cross pkg-config wrappers for msys2-cross toolchains"
+arch=('x86_64')
+options=('!strip')
+depends=('msys-cross-filesystem')
+
+source=("cross-pkg-config")
+sha256sums=('SKIP')
+
+_targets=(
+    x86_64-w64-mingw32
+    i686-w64-mingw32
+    x86_64-w64-mingw32ucrt
+    x86_64-pc-cygwin
+    clang64
+    clangarm64
+    aarch64-w64-mingw32
+)
+
+package() {
+    mkdir -p "$pkgdir/bin"
+
+    install -m755 "$srcdir/cross-pkg-config" "$pkgdir/bin/cross-pkg-config"
+
+    for _target in "${_targets[@]}"; do
+        ln -sf cross-pkg-config "$pkgdir/bin/${_target}-pkg-config"
+    done
+}
