@@ -24,12 +24,13 @@ each package by name. Both are transparently redirected to GitHub's CDN.
 |------|-----------|
 | `/repo/` | HTML listing of the **latest** release (GitHub `releases/latest`) |
 | `/repo/<file>` | 302 to the latest release's asset `<file>` |
-| `/archive/<tag>/` | HTML listing of release `<tag>` (e.g. `20260531.1`) |
+| `/archive/<tag>/` | HTML listing of release `<tag>` (e.g. `build-20260531.1`) |
 | `/archive/<tag>/<file>` | 302 to release `<tag>`'s asset `<file>` |
 | `/healthz` | `200 ok` |
 
-`<tag>` is `date.seq`, e.g. `20260531.1`, `20260531.2` — each tag is an immutable
-snapshot, so `/archive/<tag>/` is a self-contained repo archive.
+`<tag>` is `build-YYYYMMDD.N`, e.g. `build-20260531.1`, `build-20260531.2` — each
+tag is an immutable snapshot, so `/archive/<tag>/` is a self-contained repo
+archive. (The service treats `<tag>` opaquely; any tag scheme works.)
 
 ### Name resolution
 
@@ -50,7 +51,7 @@ SigLevel = Never
 Pin a snapshot instead:
 
 ```ini
-Server = https://msys.kosaka.moe/archive/20260531.1
+Server = https://msys.kosaka.moe/archive/build-20260531.1
 ```
 
 ## Configuration (env)
@@ -78,6 +79,6 @@ docker run -p 80:80 msys-mirror
 ## Publishing (CI side)
 
 The build workflow uploads every `*.pkg.tar.*` plus `msys-cross.db.tar.gz` /
-`msys-cross.files.tar.gz` to a release tagged `YYYYMMDD.N`. The `.db` is generated
+`msys-cross.files.tar.gz` to a release tagged `build-YYYYMMDD.N`. The `.db` is generated
 by `repo-add` so its metadata (CSIZE/SHA256/depends) is correct — this service
 does **not** synthesize the db.
