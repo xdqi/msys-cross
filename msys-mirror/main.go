@@ -167,6 +167,16 @@ func releaseByTag(tag string) (*release, error) {
 	return &r, nil
 }
 
+// listReleases returns all releases (newest first), used to render the
+// /archive index of available snapshot tags.
+func listReleases() ([]release, error) {
+	var rs []release
+	if err := c.fetchJSON(fmt.Sprintf("/repos/%s/%s/releases?per_page=100", owner, repo), &rs); err != nil {
+		return nil, err
+	}
+	return rs, nil
+}
+
 // ---- Asset name resolution ----
 //
 // Two normalizations let the requested name match the actual asset:
@@ -224,9 +234,10 @@ func main() {
 	})
 	mux.HandleFunc("/repo/", handleRepo)
 	mux.HandleFunc("/archive/", handleArchive)
+	mux.HandleFunc("/archive", handleArchive)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/repo/", http.StatusFound)
+			listRoot(w)
 			return
 		}
 		http.NotFound(w, r)
@@ -252,12 +263,14 @@ func handleRepo(w http.ResponseWriter, r *http.Request) {
 	serveReleasePath(w, r, rel, "/repo", rest)
 }
 
-// /archive/<tag>/ and /archive/<tag>/<file> — pinned snapshot per tag.
+// /archive            -> list of all snapshot tags
+// /archive/<tag>/      -> listing of that release
+// /archive/<tag>/<file> -> 302 to that release's asset
 func handleArchive(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/archive/")
+	rest := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/archive"), "/")
 	tag, file, _ := strings.Cut(rest, "/")
 	if tag == "" {
-		http.Error(w, "missing tag (use /archive/<tag>/)", http.StatusBadRequest)
+		listArchive(w)
 		return
 	}
 	rel, err := releaseByTag(tag)
@@ -282,29 +295,67 @@ func serveReleasePath(w http.ResponseWriter, r *http.Request, rel *release, base
 	http.Redirect(w, r, downloadURL(rel, a), http.StatusFound)
 }
 
-// listRelease renders an Apache/nginx-autoindex-style HTML listing so both
-// humans and mirroring tools can enumerate the assets. The db short-name
-// aliases are surfaced as extra links so a tool following them still works.
+// repoURL is the GitHub repo this mirror serves, linked from every page header.
+func repoURL() string { return fmt.Sprintf("https://github.com/%s/%s", owner, repo) }
+
+// pageHeader writes the common Apache/nginx-autoindex-style preamble plus a
+// header link back to the source GitHub repo.
+func pageHeader(w http.ResponseWriter, title string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, "<!DOCTYPE html>\n<html><head><title>%s</title></head><body>\n", html.EscapeString(title))
+	fmt.Fprintf(w, "<p><a href=\"%s\">%s/%s on GitHub</a></p>\n",
+		repoURL(), html.EscapeString(owner), html.EscapeString(repo))
+	fmt.Fprintf(w, "<h1>%s</h1><hr><pre>\n", html.EscapeString(title))
+}
+
+func pageFooter(w http.ResponseWriter) { fmt.Fprint(w, "</pre><hr></body></html>\n") }
+
+// link writes one autoindex row: an <a> plus right-aligned trailing text.
+func link(w http.ResponseWriter, href, name, trailing string) {
+	fmt.Fprintf(w, "<a href=\"%s\">%s</a>%s%s\n",
+		html.EscapeString(href), html.EscapeString(name), pad(name, 60), trailing)
+}
+
+// listRoot renders the top-level index: the rolling repo and the archive,
+// plus the GitHub link in the header.
+func listRoot(w http.ResponseWriter) {
+	pageHeader(w, "Index of /")
+	link(w, "/repo/", "repo/", "rolling latest release")
+	link(w, "/archive/", "archive/", "pinned snapshots (build-YYYYMMDD.N)")
+	pageFooter(w)
+}
+
+// listArchive renders the list of all snapshot tags, newest first.
+func listArchive(w http.ResponseWriter) {
+	rels, err := listReleases()
+	if err != nil {
+		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	pageHeader(w, "Index of /archive")
+	link(w, "/", "../", "")
+	for _, rel := range rels {
+		link(w, "/archive/"+rel.TagName+"/", rel.TagName+"/", rel.Published.Format("2006-01-02"))
+	}
+	pageFooter(w)
+}
+
+// listRelease renders an Apache/nginx-autoindex-style listing of a release's
+// assets so both humans and mirroring tools can enumerate them. The db
+// short-name aliases are surfaced as extra links so a tool following them works.
 func listRelease(w http.ResponseWriter, rel *release, base string) {
 	assets := append([]asset(nil), rel.Assets...)
 	sort.Slice(assets, func(i, j int) bool { return assets[i].Name < assets[j].Name })
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "<!DOCTYPE html>\n<html><head><title>Index of %s/</title></head><body>\n", html.EscapeString(base))
-	fmt.Fprintf(w, "<h1>Index of %s/ (release %s)</h1><hr><pre>\n", html.EscapeString(base), html.EscapeString(rel.TagName))
+	pageHeader(w, fmt.Sprintf("Index of %s/ (release %s)", base, rel.TagName))
 	for _, a := range assets {
-		fmt.Fprintf(w, "<a href=\"%s/%s\">%s</a>%s%d\n",
-			html.EscapeString(base), html.EscapeString(a.Name),
-			html.EscapeString(a.Name),
-			pad(a.Name, 60), a.Size)
+		link(w, base+"/"+a.Name, a.Name, fmt.Sprintf("%d", a.Size))
 		// Surface the short db/files alias next to its .tar.gz.
 		if short, ok := shortDBName(a.Name); ok {
-			fmt.Fprintf(w, "<a href=\"%s/%s\">%s</a>%s(alias of %s)\n",
-				html.EscapeString(base), html.EscapeString(short),
-				html.EscapeString(short), pad(short, 60), html.EscapeString(a.Name))
+			link(w, base+"/"+short, short, "(alias of "+a.Name+")")
 		}
 	}
-	fmt.Fprint(w, "</pre><hr></body></html>\n")
+	pageFooter(w)
 }
 
 // shortDBName returns the pacman short name for a db/files .tar.gz asset.
