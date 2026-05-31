@@ -47,6 +47,29 @@ if ! id builduser >/dev/null 2>&1; then
 fi
 echo
 
+# The whole build runs as this one unprivileged user (so the sccache server is
+# single-uid and never hands another uid root-owned objects). runuser scrubs the
+# environment, so forward the bits the build/sccache need explicitly via `env`.
+# Anything writable is chown'd to builduser before use.
+run_as_builduser() {
+    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" 2>/dev/null || true
+    runuser -u builduser -- env \
+        PATH="$PATH" \
+        ZIG_PATH="$ZIG_PATH" \
+        DEPS="$DEPS" DEPS_INSTALL="$DEPS_INSTALL" DEPS_CACHE="$DEPS_CACHE" \
+        BOOTSTRAP_PREFIX="$BOOTSTRAP_PREFIX" INSTALL_PREFIX="$INSTALL_PREFIX" \
+        PKGDEST="$PKGDEST" SRCDEST="$SRCDEST" LOGDEST="$LOGDEST" \
+        ${BUILDDIR:+BUILDDIR="$BUILDDIR"} \
+        JOBS="$JOBS" \
+        SCCACHE_PATH="${SCCACHE_PATH:-}" \
+        SCCACHE_GHA_ENABLED="${SCCACHE_GHA_ENABLED:-}" \
+        SCCACHE_GHA_VERSION="${SCCACHE_GHA_VERSION:-}" \
+        ACTIONS_RESULTS_URL="${ACTIONS_RESULTS_URL:-}" \
+        ACTIONS_RUNTIME_TOKEN="${ACTIONS_RUNTIME_TOKEN:-}" \
+        ACTIONS_CACHE_SERVICE_V2="${ACTIONS_CACHE_SERVICE_V2:-}" \
+        "$@"
+}
+
 # ---- Step 1: Prepare zig ----
 echo "===== Step 1: Prepare Zig ====="
 bash "$SCRIPTS_DIR/prepare-zig.sh"
@@ -57,9 +80,11 @@ echo "===== Step 2: Prepare build sysroots ====="
 bash "$SCRIPTS_DIR/prepare-build-sysroot.sh"
 
 # ---- Step 3: Build static deps ----
+# Built as builduser (see run_as_builduser) so the sccache server is the same uid
+# as the gcc/binutils phase.
 echo ""
 echo "===== Step 3: Build static dependencies ====="
-bash "$SCRIPTS_DIR/build_deps.sh"
+run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
 
 # ---- Helpers for building PKGBUILDs ----
 build_pkg() {
@@ -94,7 +119,7 @@ build_pkg() {
     echo ""
     echo "===== Building $pkg_dir ====="
     cd "$PROJECT_ROOT/pkgs/$pkg_dir"
-    runuser -u builduser -- makepkg $makepkg_args
+    run_as_builduser makepkg $makepkg_args
 
     # Reclaim this package's scratch tree now that its .pkg.tar.* is in PKGDEST.
     # Each package has an isolated BUILDDIR and no later package reads a prior

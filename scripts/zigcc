@@ -12,6 +12,8 @@
 # Prefer an explicit $SCCACHE_PATH (exported by mozilla-actions/sccache-action)
 # since PATH may be reset when the build drops to an unprivileged user via runuser;
 # fall back to sccache on PATH, else compile directly (caching is opt-in).
+# (The whole build runs as one unprivileged user, so the sccache server stays
+# single-uid — no cross-uid object-ownership clashes.)
 if [ -z "${_ZIGCC_INNER:-}" ]; then
     _sccache="${SCCACHE_PATH:-}"
     [ -z "$_sccache" ] && _sccache="$(command -v sccache 2>/dev/null || true)"
