@@ -1,4 +1,15 @@
 #!/bin/sh
+# zig c++ wrapper, optionally routed through sccache. See zigcc for the
+# two-role (_ZIGCC_INNER) sccache trick; the only difference here is that
+# compile invocations (-c/-E/-S) need an explicit `-x c++`.
+if [ -z "${_ZIGCC_INNER:-}" ]; then
+    _sccache="${SCCACHE_PATH:-}"
+    [ -z "$_sccache" ] && _sccache="$(command -v sccache 2>/dev/null || true)"
+    if [ -n "$_sccache" ]; then
+        _ZIGCC_INNER=1 exec "$_sccache" "$0" "$@"
+    fi
+fi
+unset _ZIGCC_INNER 2>/dev/null || true
 is_compile=false
 for a in "$@"; do case "$a" in -c|-E|-S) is_compile=true; break ;; esac; done
 if $is_compile; then

@@ -1,2 +1,23 @@
 #!/bin/sh
+# zig cc wrapper, optionally routed through sccache.
+#
+# sccache can't wrap `zig cc` directly (it's a two-segment command; sccache
+# probes the first token `zig` with `-E` and bails as "Compiler not supported").
+# So this wrapper plays two roles, distinguished by _ZIGCC_INNER:
+#   - outer (build calls $CC=zigcc): re-exec as `sccache <self>` so sccache sees a
+#     single-executable C compiler it can probe and cache (zig cc == clang).
+#   - inner (sccache calls <self>): do the real `zig cc`.
+# If sccache isn't available, compile directly — caching is purely opt-in, so
+# local builds without sccache are unaffected.
+# Prefer an explicit $SCCACHE_PATH (exported by mozilla-actions/sccache-action)
+# since PATH may be reset when the build drops to an unprivileged user via runuser;
+# fall back to sccache on PATH, else compile directly (caching is opt-in).
+if [ -z "${_ZIGCC_INNER:-}" ]; then
+    _sccache="${SCCACHE_PATH:-}"
+    [ -z "$_sccache" ] && _sccache="$(command -v sccache 2>/dev/null || true)"
+    if [ -n "$_sccache" ]; then
+        _ZIGCC_INNER=1 exec "$_sccache" "$0" "$@"
+    fi
+fi
+unset _ZIGCC_INNER 2>/dev/null || true
 exec zig cc -target x86_64-linux-gnu.2.11 "$@"

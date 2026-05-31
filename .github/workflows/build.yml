@@ -45,7 +45,7 @@ jobs:
         run: pacman -Sy --noconfirm --needed git nodejs github-cli
 
       - name: Checkout (with MSYS2-packages submodule)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -56,6 +56,31 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory '*'
+
+      # Compiler cache. The zigcc/zigc++ wrappers route `zig cc`/`zig c++` through
+      # sccache when SCCACHE_PATH is set (they hand it a single-exec shim so sccache
+      # — which can't parse the two-token `zig cc` — sees a cacheable clang). This
+      # turns the ~1.5h cold gcc/binutils compile into a near-cache-hit rebuild on
+      # re-runs. SCCACHE_GHA_ENABLED uses the Actions cache as the object store;
+      # the env is exported to $GITHUB_ENV so it survives the drop to builduser.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.10.0"
+      # The GHA cache backend needs ACTIONS_RESULTS_URL + ACTIONS_RUNTIME_TOKEN,
+      # which aren't exposed to plain `run:` steps — export them (and the sccache
+      # enable flags) to $GITHUB_ENV so build.sh, and builduser via runuser, can
+      # reach the object store.
+      - name: Export sccache GHA tokens
+        uses: actions/github-script@v9
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Enable sccache GHA backend
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_PATH=${SCCACHE_PATH}" >> "$GITHUB_ENV"
 
       # The gcc/binutils versions are NOT in our PKGBUILDs — inherit_msys2 greps
       # them from the MSYS2-packages submodule at build time. So the pkg-source
@@ -76,7 +101,7 @@ jobs:
       # Static deps (gmp/mpfr/mpc/isl/zlib/zstd): keyed by build_deps.sh, which
       # holds all the *_VER defaults — a version bump changes the hash → new cache.
       - name: Cache static-dep source tarballs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/.deps-src
           key: deps-src-${{ runner.os }}-${{ hashFiles('scripts/build_deps.sh') }}
@@ -88,7 +113,7 @@ jobs:
       # versions) AND the local pkgs/ (our PKGBUILDs + patches). Stale restores are
       # safe — makepkg re-validates checksums and only re-downloads what changed.
       - name: Cache pkg source tarballs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/sources
           key: pkg-src-${{ runner.os }}-${{ steps.submodule.outputs.sha }}-${{ hashFiles('pkgs/**') }}
@@ -103,6 +128,10 @@ jobs:
       - name: Build toolchain repo
         run: bash scripts/build.sh
 
+      - name: sccache stats
+        if: always()
+        run: "${SCCACHE_PATH:-sccache} --show-stats || true"
+
       - name: Summarize repo
         run: |
           echo "=== Packages ==="
@@ -116,7 +145,7 @@ jobs:
       # gcc/binutils packages are now stripped with split debug symbols, so the
       # main packages are small and a separate *-debug package carries symbols.
       - name: Upload pacman repo
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: msys-cross-repo
           path: |
@@ -127,7 +156,7 @@ jobs:
           retention-days: 14
 
       - name: Upload bootstrap tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: msys-cross-bootstrap
           path: repo/bootstrap.tar.xz
