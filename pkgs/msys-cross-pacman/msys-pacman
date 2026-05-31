@@ -1,20 +1,14 @@
 #!/bin/sh
-# msys-pacman — relocatable pacman-static wrapper for msys2-cross toolchain
+# msys-pacman — relocatable pacman-static wrapper for msys2-cross toolchain.
+# pacman-static is binary-patched to drop the root requirement, so this runs the
+# same whether root or not — no fakeroot needed.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 export CURL_CA_BUNDLE="$PREFIX/etc/ssl/certs/ca-certificates.crt"
 
-if [ "$(id -u)" != "0" ] && command -v fakeroot >/dev/null 2>&1; then
-    exec fakeroot "$PREFIX/libexec/pacman-static" \
-        --root="$PREFIX" \
-        --config="$PREFIX/etc/pacman.d/pacman.conf" \
-        --dbpath="$PREFIX/var/lib/pacman" \
-        "$@"
-else
-    exec "$PREFIX/libexec/pacman-static" \
-        --root="$PREFIX" \
-        --config="$PREFIX/etc/pacman.d/pacman.conf" \
-        --dbpath="$PREFIX/var/lib/pacman" \
-        "$@"
-fi
+exec "$PREFIX/libexec/pacman-static" \
+    --root="$PREFIX" \
+    --config="$PREFIX/etc/pacman.d/pacman.conf" \
+    --dbpath="$PREFIX/var/lib/pacman" \
+    "$@"

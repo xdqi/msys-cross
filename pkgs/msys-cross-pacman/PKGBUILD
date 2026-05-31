@@ -1,18 +1,74 @@
 # Maintainer: msys2-cross project
 _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pkgname=msys-cross-pacman
-pkgver=6.0.1
-pkgrel=1
-pkgdesc="pacman-static and wrapper script for msys2-cross bootstrap"
+# Upstream archlinuxcn build of Morganamilo's static pacman.
+pkgver=7.1.0.r9.g54d9411
+pkgrel=3
+pkgdesc="Static, non-root-patched pacman + wrapper for msys2-cross bootstrap"
 arch=('x86_64')
 options=('!strip')
 depends=('msys-cross-filesystem' 'msys-cross-ca-certificates')
 backup=('etc/pacman.d/pacman.conf')
 
-source=("pacman-static"
+# pacman-static binary comes from the archlinuxcn repo (Morganamilo's musl build,
+# repackaged). We extract usr/bin/pacman-static and binary-patch out the hard root
+# requirement (see patch-pacman-nonroot.sh) so the bootstrap can install into a
+# user-owned prefix without fakeroot. The distro pkgrel (-27) is baked into the
+# URL; if archlinuxcn re-packages, this 404s — bump _aur_pkgrel + the sha256.
+_aur_pkgrel=27
+source=("pacman-static-${pkgver}-${_aur_pkgrel}-x86_64.pkg.tar.xz::https://repo.archlinuxcn.org/x86_64/pacman-static-${pkgver}-${_aur_pkgrel}-x86_64.pkg.tar.xz"
+        "patch-pacman-nonroot.sh"
         "pacman.conf"
         "msys-pacman")
-sha256sums=('SKIP' 'SKIP' 'SKIP')
+sha256sums=('be40b5edc5a8800ab6f8c68a9bd8c64496f59fc6aca230a478e68aef08fae64e'
+            'SKIP'
+            'SKIP'
+            'SKIP')
+
+prepare() {
+    # Extract just the static pacman binary from the upstream package.
+    bsdtar -xf "$srcdir/pacman-static-${pkgver}-${_aur_pkgrel}-x86_64.pkg.tar.xz" \
+        -C "$srcdir" usr/bin/pacman-static
+    cp "$srcdir/usr/bin/pacman-static" "$srcdir/pacman-static"
+    chmod +w "$srcdir/pacman-static"
+
+    # Remove the hard root requirement (je -> jmp on the myuid>0 && needs_root guard).
+    bash "$srcdir/patch-pacman-nonroot.sh" "$srcdir/pacman-static"
+}
+
+check() {
+    # makepkg runs as an unprivileged user, so this is a genuine non-root test:
+    # the patched binary must get PAST the root gate (no "unless you are root"
+    # error) and reach the "Synchronizing package databases" stage. A future
+    # archlinuxcn rebuild that moves the patch site is caught here.
+    [ "$(id -u)" -ne 0 ] || { echo "check(): refusing to validate as root"; return 1; }
+
+    local root="$srcdir/_checkroot"
+    rm -rf "$root"
+    mkdir -p "$root/var/lib/pacman"
+    cat > "$root/pacman.conf" <<'EOF'
+[options]
+Architecture = x86_64
+SigLevel = Never
+[core]
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+EOF
+
+    local out
+    out=$("$srcdir/pacman-static" --root "$root" --config "$root/pacman.conf" \
+        --dbpath "$root/var/lib/pacman" --noconfirm -Sy 2>&1) || true
+    echo "$out"
+
+    if grep -qi 'unless you are root' <<<"$out"; then
+        echo "check(): FAILED — patched binary still demands root" >&2
+        return 1
+    fi
+    if ! grep -qi 'Synchronizing package databases' <<<"$out"; then
+        echo "check(): FAILED — did not reach DB sync (network down, or patch broke -S?)" >&2
+        return 1
+    fi
+    echo "check(): OK — non-root pacman -Sy passes the root gate"
+}
 
 package() {
     mkdir -p "$pkgdir/bin" "$pkgdir/libexec" "$pkgdir/etc/pacman.d"
