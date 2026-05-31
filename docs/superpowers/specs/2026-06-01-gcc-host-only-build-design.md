@@ -75,49 +75,70 @@ make -C c++tools DESTDIR=… install        # if present
 
 No `make -C <target>/lib*… install` — target libs are not built or installed.
 
-### 3. target runtime libs come from upstream
+### 3. target gcc-internal libs are repackaged at build time (no upstream-gcc dep for users)
 
-The produced `msys-cross-*-gcc` package keeps depending on the upstream packages
-for the runtime libs the user links/runs against. With the standard layout, the
-host compiler's `-print-search-dirs` should find them where the upstream gcc
-package installs them in the sysroot.
+The end user must NOT have to install the upstream MSYS2 **gcc** package. Instead,
+at PKGBUILD time we download the upstream gcc package, extract the gcc-internal
+target bits that `make all-gcc` no longer produces, and bundle them into our own
+`msys-cross-*-gcc` package (relocated to the standard layout our host compiler
+searches). The user installs only our package (+ the normal sysroot packages).
 
-- mingw64/32/ucrt64: add `mingw-w64-<arch>-gcc` and `-gcc-fortran` to `depends`
-  (alongside the existing `gcc-libs`/`crt`/`headers`). These carry the
-  version-matched `libgcc.a`/`libstdc++.a`/C++ headers/`libgfortran.a`.
-- cygwin: depend on the msys-repo `gcc` 15.2.0 bits (mechanism TBD in PoC — may
-  need to vendor/repackage since it's a `pacman`/msys package, not a dependency
-  our repo can express directly).
+Split of responsibility:
+
+- **Repackaged into our gcc package** (gcc-internal, version-locked — what we
+  stopped building): `libgcc.a`, `libgcc_eh.a`, `libgcov.a`, `crtbegin.o`,
+  `crtend.o`, `crtfastmath.o`, `libstdc++.a`/`.dll.a`, `libsupc++.a`,
+  `libstdc++exp.a`/`fs.a`, the C++ headers (`include/c++/<ver>/`), `libgfortran.a`,
+  `libgomp.a`, `libquadmath.a`, `libatomic.a`, plus the matching runtime DLLs
+  (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libgfortran-5.dll`, …) — i.e. the
+  exact set the current self-built package ships under `lib/gcc/<target>/<ver>/`.
+  Extract from: `mingw-w64-<arch>-gcc` + `mingw-w64-<arch>-gcc-fortran` (mingw
+  repo, 16.1.0); cygwin from the msys repo `gcc` 15.2.0.
+- **Kept as `depends` (genuine target sysroot, unchanged)**:
+  `mingw-w64-<arch>-{headers,crt,winpthreads,gcc-libs,zlib,windows-default-manifest}`.
+  `gcc-libs` here is the target system's runtime DLLs that the built `.exe`
+  loads — that belongs to the target's package set, not bundled into a
+  cross-compiler. The toolchain already requires these regardless.
+
+Extraction happens in `prepare()`/`package()` via `bsdtar -x` of the upstream
+`.pkg.tar.zst` (sha256-pinned, fetched into `SRCDEST`), then relocating the bits
+into the package's standard-layout paths. No new runtime dependency on the
+upstream gcc package.
 
 ### 4. scope unchanged
 
 binutils, pacman, clang, the mirror, CI — all unchanged. Only the four gcc
 PKGBUILDs (`msys-cross-gcc` for the 3 mingw, `msys-cross-cygwin-gcc`) change.
 
-## Risks / must-verify-in-PoC
+## Risks / must-verify (local container PoC)
 
-This is a real build-architecture change; a **mingw64-only PoC** gates it before
+This is a real build-architecture change; a **mingw64-only PoC, run in a local
+`archlinux/archlinux:base-devel` docker container** (not CI), gates it before
 touching all four targets:
 
 1. **`make all-gcc` completeness** — does the gcc subdir build/install cleanly
    without ever building target libgcc? (Expected yes; configure already ran.)
 2. **Search-path alignment** — with `--disable-version-specific-runtime-libs`,
-   does the host compiler's `-print-search-dirs` / default sysroot point at where
-   the upstream gcc package installs `libgcc.a`/`libstdc++.a`/`crtbegin.o`/C++
-   headers? This is the crux of route X.
-3. **End-to-end capability** — compile + link C, C++ (`<iostream>`), and Fortran
+   does the host compiler's `-print-search-dirs` find the repackaged
+   `libgcc.a`/`libstdc++.a`/`crtbegin.o`/C++ headers at the standard-layout paths
+   we relocate them to? This is the crux of route X and decides X vs the Y
+   fallback.
+3. **Repackaging fidelity** — the extracted+relocated upstream bits must land at
+   exactly the paths the host compiler searches, and be ABI-compatible with our
+   `all-gcc`-built driver (same version + configure, so expected compatible).
+4. **End-to-end capability** — compile + link C, C++ (`<iostream>`), and Fortran
    to PE, run under wine, exit codes correct (as already done for the current
    toolchain). C++ must find headers + libstdc++; static link must find crt+libgcc.
-4. **Granular install target names** — confirm `install-driver/install-cpp/…`
+5. **Granular install target names** — confirm `install-driver/install-cpp/…`
    exist for our GCC 16 + cross configuration.
-5. **cygwin sourcing** — confirm the msys-repo `gcc` 15.2.0 target bits are
-   usable and how to wire them as a dependency.
 
-PoC = on mingw64 only: rebuild `msys-cross-mingw64-gcc` with the route-X changes,
-install the upstream `mingw-w64-x86_64-gcc`+`-gcc-fortran` target bits, and run
-the C/C++/Fortran compile-link-wine checks. If green, generalize to all four; if
-search-path alignment fails, fall back to route Y (keep version-specific, relocate
-upstream libs into `lib/gcc/<target>/<ver>/` at package time).
+PoC steps (local docker): rebuild `msys-cross-mingw64-gcc` with the route-X
+changes (`all-gcc` + granular host install + extract/relocate upstream
+`mingw-w64-x86_64-gcc`+`-gcc-fortran` target bits), then run the C/C++/Fortran
+compile-link-wine checks. If green, generalize to all four targets; if search-path
+alignment fails, fall back to route Y (keep version-specific layout, relocate
+upstream libs into `lib/gcc/<target>/<ver>/`). The repackaging logic is identical
+in both routes — only the destination paths differ.
 
 ## Expected payoff
 
