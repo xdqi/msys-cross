@@ -27,7 +27,10 @@ pkgname=(
     msys-cross-cygwin-binutils
 )
 arch=('x86_64')
-options=('!strip')
+# strip + debug => small main packages + a separate *-debug package carrying the
+# split debug symbols (the cross-tool binaries are host Linux ELF, so objcopy
+# --only-keep-debug applies normally). Preserve the inherited upstream flags.
+options=('strip' 'debug' 'staticlibs' '!distcc' '!ccache' '!buildflags')
 
 # ---- Target map ----
 declare -A _target_subdir

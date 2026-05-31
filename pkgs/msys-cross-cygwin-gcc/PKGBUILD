@@ -42,9 +42,15 @@ eval "$(declare -f _msys2_build | sed \
 _our_pkgrel=1
 pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 
+# Override the inherited upstream pkgbase (gcc) so the split debug package is
+# named msys-cross-cygwin-gcc-debug, not gcc-debug.
+pkgbase=msys-cross-cygwin-gcc
 pkgname=(msys-cross-cygwin-gcc)
 arch=('x86_64')
-options=('!strip')
+# strip + debug => small main package + a separate *-debug package carrying the
+# split debug symbols (the cross-gcc binaries are host Linux ELF, so objcopy
+# --only-keep-debug applies normally). Preserve the inherited upstream flags.
+options=('strip' 'debug' '!emptydirs')
 
 # ---- Extra chimera patches ----
 _chimera_patches=(
