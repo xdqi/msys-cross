@@ -11,7 +11,7 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
 GMP_VER="${GMP_VER:-6.3.0}"
-MPFR_VER="${MPFR_VER:-4.2.1}"
+MPFR_VER="${MPFR_VER:-4.2.2}"
 MPC_VER="${MPC_VER:-1.3.1}"
 ISL_VER="${ISL_VER:-0.27}"
 ZLIB_VER="${ZLIB_VER:-1.3.2}"
