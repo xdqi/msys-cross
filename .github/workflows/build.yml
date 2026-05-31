@@ -1,0 +1,84 @@
+# Build the full msys2-cross toolchain repo on GitHub Actions.
+#
+# The build runs inside an Arch Linux container because scripts/build.sh drives
+# the host package manager directly (`pacman -Syu`). Everything else — Zig, the
+# MSYS2 sysroots, and the gmp/mpfr/mpc/isl/zlib/zstd source tarballs — is fetched
+# inside the container, so the workflow is essentially `bash scripts/build.sh`.
+#
+# Output: the pacman repo under repo/ (toolchain packages + msys-cross.db) and the
+# bootstrap installer under installer/, uploaded as build artifacts.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One in-flight build per ref; a newer push cancels the older run.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux/archlinux:base-devel
+      # base-devel image ships the makepkg toolchain; build.sh still runs
+      # `pacman -Syu` and creates an unprivileged builduser, so it needs root
+      # inside the container (the default for GHA service containers).
+    timeout-minutes: 180
+
+    steps:
+      # actions/checkout shells out to git; the minimal Arch image ships neither
+      # git nor the node the action needs, so install them up front.
+      - name: Install checkout prerequisites
+        run: pacman -Sy --noconfirm --needed git nodejs
+
+      - name: Checkout (with MSYS2-packages submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The repo is checked out as root but git refuses to operate on a tree owned
+      # by another uid once builduser is involved; mark it safe pre-emptively.
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # build.sh frees each package's scratch BUILDDIR right after that package
+      # is built, so peak disk is ~one toolchain build tree at a time rather than
+      # all of them — no host-level disk reclaim (maximize-build-space / LVM) is
+      # needed, and none would work inside this container job anyway.
+      - name: Build toolchain repo
+        run: bash scripts/build.sh
+
+      - name: Summarize repo
+        run: |
+          echo "=== Packages ==="
+          ls -lh repo/*.pkg.tar.* 2>/dev/null || true
+          echo "=== Database ==="
+          ls -lh repo/msys-cross.db* 2>/dev/null || true
+
+      # The gcc/binutils packages are unstripped (options=('!strip')); the four gcc
+      # targets alone are ~1.8 GB. Splitting the upload keeps each artifact under
+      # the per-file limits and lets the lightweight installer be downloaded alone.
+      - name: Upload pacman repo
+        uses: actions/upload-artifact@v4
+        with:
+          name: msys-cross-repo
+          path: |
+            repo/*.pkg.tar.*
+            repo/msys-cross.db*
+            repo/msys-cross.files*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload bootstrap installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: msys-cross-installer
+          path: installer/
+          if-no-files-found: error
+          retention-days: 14

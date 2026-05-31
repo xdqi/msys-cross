@@ -95,6 +95,14 @@ build_pkg() {
     echo "===== Building $pkg_dir ====="
     cd "$PROJECT_ROOT/pkgs/$pkg_dir"
     runuser -u builduser -- makepkg $makepkg_args
+
+    # Reclaim this package's scratch tree now that its .pkg.tar.* is in PKGDEST.
+    # Each package has an isolated BUILDDIR and no later package reads a prior
+    # one's build tree (outputs live in PKGDEST + INSTALL_PREFIX), so this keeps
+    # peak disk at ~one toolchain build at a time. Skip detection re-derives from
+    # the PKGBUILD + PKGDEST, so removing BUILDDIR doesn't break re-runs.
+    echo "----- Cleaning build dir: $BUILDDIR -----"
+    rm -rf "$BUILDDIR"
 }
 
 install_local() {
