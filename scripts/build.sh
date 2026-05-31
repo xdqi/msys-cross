@@ -51,10 +51,10 @@ echo
 echo "===== Step 1: Prepare Zig ====="
 bash "$SCRIPTS_DIR/prepare-zig.sh"
 
-# ---- Step 2: Prepare bootstrap (MSYS2 sysroots) ----
+# ---- Step 2: Prepare build sysroots (MSYS2 target headers/libs) ----
 echo ""
-echo "===== Step 2: Prepare bootstrap prefix ====="
-bash "$SCRIPTS_DIR/prepare-bootstrap.sh"
+echo "===== Step 2: Prepare build sysroots ====="
+bash "$SCRIPTS_DIR/prepare-build-sysroot.sh"
 
 # ---- Step 3: Build static deps ----
 echo ""

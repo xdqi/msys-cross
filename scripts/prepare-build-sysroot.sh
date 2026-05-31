@@ -1,8 +1,11 @@
 #!/bin/bash
-# Prepare MSYS2 bootstrap prefix (sysroots for cross-compilation).
-# Uses native pacman to install mingw64/mingw32/ucrt64/msys sysroots.
+# Prepare the MSYS2 target sysroots used at build time (headers/libs/binutils
+# for mingw64/mingw32/ucrt64/cygwin). This is the cross-compiler's *target*
+# system — NOT the user-facing bootstrap.tar.xz (that is built by
+# build_installer.sh from the finished packages).
+# Uses native pacman to install the mingw64/mingw32/ucrt64/msys sysroots.
 #
-# Output: build/bootstrap-prefix/{mingw64,mingw32,ucrt64,usr}
+# Output: $BOOTSTRAP_PREFIX (default build/bootstrap-prefix)/{mingw64,mingw32,ucrt64,usr}
 set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
