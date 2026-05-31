@@ -5,8 +5,10 @@
 # MSYS2 sysroots, and the gmp/mpfr/mpc/isl/zlib/zstd source tarballs — is fetched
 # inside the container, so the workflow is essentially `bash scripts/build.sh`.
 #
-# Output: the pacman repo under repo/ (toolchain packages + msys-cross.db) and the
-# bootstrap installer under installer/, uploaded as build artifacts.
+# Output: the pacman repo under repo/ (toolchain packages + msys-cross.db +
+# bootstrap.tar.xz), uploaded as build artifacts and, on push to main, published
+# to a GitHub Release tagged YYYYMMDD.N — which is what the msys-mirror service
+# serves (packages live as release assets, GitHub provides storage + CDN).
 name: build
 
 on:
@@ -21,6 +23,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# Needed by the release step (gh release create/upload) on push to main.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,9 +39,10 @@ jobs:
 
     steps:
       # actions/checkout shells out to git; the minimal Arch image ships neither
-      # git nor the node the action needs, so install them up front.
-      - name: Install checkout prerequisites
-        run: pacman -Sy --noconfirm --needed git nodejs
+      # git nor the node the action needs. github-cli (gh) is for the release
+      # step — the whole job runs in this container, so gh must live here too.
+      - name: Install prerequisites
+        run: pacman -Sy --noconfirm --needed git nodejs github-cli
 
       - name: Checkout (with MSYS2-packages submodule)
         uses: actions/checkout@v4
@@ -59,11 +66,13 @@ jobs:
           echo "=== Packages ==="
           ls -lh repo/*.pkg.tar.* 2>/dev/null || true
           echo "=== Database ==="
-          ls -lh repo/msys-cross.db* 2>/dev/null || true
+          ls -lh repo/msys-cross.db* repo/msys-cross.files* 2>/dev/null || true
+          echo "=== Bootstrap ==="
+          ls -lh repo/bootstrap.tar.xz 2>/dev/null || true
 
-      # The gcc/binutils packages are unstripped (options=('!strip')); the four gcc
-      # targets alone are ~1.8 GB. Splitting the upload keeps each artifact under
-      # the per-file limits and lets the lightweight installer be downloaded alone.
+      # Build artifacts (kept for PRs and as a fallback to the release). The
+      # gcc/binutils packages are now stripped with split debug symbols, so the
+      # main packages are small and a separate *-debug package carries symbols.
       - name: Upload pacman repo
         uses: actions/upload-artifact@v4
         with:
@@ -75,10 +84,49 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload bootstrap installer
+      - name: Upload bootstrap tarball
         uses: actions/upload-artifact@v4
         with:
-          name: msys-cross-installer
-          path: installer/
+          name: msys-cross-bootstrap
+          path: repo/bootstrap.tar.xz
           if-no-files-found: error
           retention-days: 14
+
+      # Publish to a GitHub Release on push to main. The release assets are what
+      # the msys-mirror service serves (it 302-redirects pacman to them). The tag
+      # is build-YYYYMMDD.N (N = next sequence for today): the "build-" prefix keeps
+      # these out of any semantic-version tag space, and each tag is an immutable
+      # snapshot reachable at /archive/build-YYYYMMDD.N/, newest served at /repo/.
+      #
+      # No trigger loop: this workflow only fires on push to the main branch and on
+      # PRs — NOT on `push: tags:` — so creating the release tag does not re-run it.
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          # gh authenticates with this; GH_REPO pins the repo so gh doesn't have to
+          # infer it from git remotes (the checkout is owned by another uid here).
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          date_tag="$(date -u +%Y%m%d)"
+          # Count existing build- releases for today to pick the next .N.
+          n="$(gh release list --limit 200 --json tagName \
+                 --jq "[.[] | select(.tagName | startswith(\"build-${date_tag}.\"))] | length" \
+               2>/dev/null || echo 0)"
+          tag="build-${date_tag}.$((n + 1))"
+          echo "Release tag: $tag"
+
+          # Assets: the pacman repo (packages + db/files) and the bootstrap tarball.
+          # repo-add wrote msys-cross.db/.files as symlinks; upload the real
+          # .tar.gz only (the mirror aliases the short names).
+          assets=()
+          for f in repo/*.pkg.tar.* repo/msys-cross.db.tar.gz repo/msys-cross.files.tar.gz repo/bootstrap.tar.xz; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          echo "Uploading ${#assets[@]} assets"
+
+          gh release create "$tag" "${assets[@]}" \
+            --title "$tag" \
+            --notes "Automated build from ${GITHUB_SHA}. Consumed by msys-mirror; pin via /archive/${tag}/." \
+            --target "${GITHUB_SHA}"
