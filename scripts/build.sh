@@ -117,6 +117,10 @@ install_local "msys-cross-filesystem-*.pkg.tar.*"
 install_local "msys-cross-ca-certificates-*.pkg.tar.*"
 install_local "msys-cross-pacman-*.pkg.tar.*"
 
+# Cross pkg-config wrappers
+build_pkg "msys-cross-pkgconfig"
+install_local "msys-cross-pkgconfig-*.pkg.tar.*"
+
 # Binutils (GCC needs as/ld in PATH)
 build_pkg "msys-cross-binutils"
 

@@ -2,7 +2,7 @@
 _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pkgname=msys-cross-pkgconfig
 pkgver=1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Cross pkg-config wrappers for msys2-cross toolchains"
 arch=('x86_64')
 options=('!strip')

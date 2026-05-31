@@ -1,5 +1,15 @@
 #!/bin/sh
-# cross-pkg-config — relocatable pkg-config wrapper for msys2-cross
+# cross-pkg-config — relocatable pkg-config wrapper for msys2-cross.
+#
+# The .pc files installed under e.g. /opt/msys2-cross/mingw64/lib/pkgconfig/
+# encode `prefix=/mingw64` (the path the package would have on a real MSYS2
+# install). To make those .pc files resolve correctly under our cross-prefix,
+# we point pkg-config at the cross-prefix as PKG_CONFIG_SYSROOT_DIR and let
+# it stitch sysroot + prefix into the full host path.
+#
+# We also set PKG_CONFIG_LIBDIR (not just _PATH) to wipe out the default
+# host search path so the host's /usr/lib/pkgconfig/blkid.pc and friends
+# don't accidentally leak into a Windows build.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -7,16 +17,21 @@ _target="${0##*/}"
 _target="${_target%-pkg-config}"
 
 case "$_target" in
-    x86_64-w64-mingw32)        _sysroot="$PREFIX/mingw64" ;;
-    i686-w64-mingw32)          _sysroot="$PREFIX/mingw32" ;;
-    x86_64-w64-mingw32ucrt)    _sysroot="$PREFIX/ucrt64" ;;
-    x86_64-pc-cygwin)          _sysroot="$PREFIX/usr" ;;
-    clang64)                   _sysroot="$PREFIX/clang64" ;;
+    x86_64-w64-mingw32)        _subdir="mingw64" ;;
+    i686-w64-mingw32)          _subdir="mingw32" ;;
+    x86_64-w64-mingw32ucrt)    _subdir="ucrt64" ;;
+    x86_64-pc-cygwin)          _subdir="usr" ;;
+    clang64)                   _subdir="clang64" ;;
     clangarm64|aarch64-w64-mingw32)
-                               _sysroot="$PREFIX/clangarm64" ;;
+                               _subdir="clangarm64" ;;
     *) echo "Unknown target: $_target" >&2; exit 1 ;;
 esac
 
-export PKG_CONFIG_SYSROOT_DIR="$_sysroot"
-export PKG_CONFIG_PATH="$_sysroot/lib/pkgconfig:$_sysroot/share/pkgconfig"
+_sysroot="$PREFIX/$_subdir"
+
+# SYSROOT_DIR = the cross-prefix root, NOT the inner mingwXX dir, because
+# the .pc files already include /mingwXX in their prefix= line.
+export PKG_CONFIG_SYSROOT_DIR="$PREFIX"
+export PKG_CONFIG_LIBDIR="$_sysroot/lib/pkgconfig:$_sysroot/share/pkgconfig"
+unset PKG_CONFIG_PATH
 exec pkg-config "$@"
