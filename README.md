@@ -1,14 +1,70 @@
 # msys2-cross
 
-A relocatable **Windows cross-compiler toolchain**, built on Linux and
-distributed as a pacman repository. It provides GCC + binutils for the standard
-MSYS2 targets, installable into any prefix and movable anywhere — the compilers
-are built with `zig cc` against a glibc 2.11 ABI, so they run on old and new
-Linux distros alike.
+**Compile Windows programs from Linux.** This is a ready-to-use toolchain — you
+get commands like `x86_64-w64-mingw32-gcc` that turn your `.c`/`.cpp` files into
+Windows `.exe` files, without needing Windows or MSYS2 installed.
 
-Windows target runtimes (headers, CRT, winpthreads, …) are pulled from the
-official MSYS2 repositories rather than rebuilt, so the toolchain stays in lock
-step with upstream MSYS2.
+Install once, then use it like any other compiler. The toolchain installs into a
+single folder you can move anywhere, and it works on both old and new Linux
+distros.
+
+## Install
+
+You need three things: download a small bootstrap, add it to your `PATH`, then
+install the compiler you want. That's it.
+
+```sh
+# 1. Download and unpack the bootstrap (a self-contained package manager).
+sudo mkdir -p /opt
+curl -L https://msys.kosaka.moe/repo/bootstrap.tar.xz | sudo tar -xJ -C /opt
+
+# 2. Add it to your PATH (put this in ~/.bashrc to make it permanent).
+export PATH="/opt/msys2-cross/bin:$PATH"
+
+# 3. Let your user own the install, so future updates need no sudo.
+sudo chown -R "$(id -un)" /opt/msys2-cross
+
+# 4. Install a compiler. The Windows headers/libraries it needs are
+#    downloaded automatically.
+msys-pacman -Sy
+msys-pacman -S msys-cross-mingw64-gcc
+```
+
+Pick the compiler that matches your target:
+
+| Install this | Gives you the command | Builds |
+|---|---|---|
+| `msys-cross-mingw64-gcc` | `x86_64-w64-mingw32-gcc` | 64-bit Windows |
+| `msys-cross-mingw32-gcc` | `i686-w64-mingw32-gcc` | 32-bit Windows |
+| `msys-cross-ucrt64-gcc` | `x86_64-w64-mingw32ucrt-gcc` | 64-bit Windows (UCRT) |
+| `msys-cross-cygwin-gcc` | `x86_64-pc-cygwin-gcc` | Cygwin |
+
+## Use
+
+Just call the compiler — no special flags needed. Use `-gcc` for C and `-g++`
+for C++:
+
+```sh
+echo 'int main(){ return 0; }' > hello.c
+x86_64-w64-mingw32-gcc -o hello.exe hello.c   # produces a Windows .exe
+```
+
+Copy `hello.exe` to a Windows machine (or run it with `wine hello.exe`) and it
+works. For C++ programs, either link statically with `-static`, or ship the
+runtime DLLs (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`) next to your `.exe`.
+
+## Updating
+
+Because you took ownership of the folder in step 3, updates need no `sudo`:
+
+```sh
+msys-pacman -Syu
+```
+
+`msys-pacman` is a small wrapper around a static, prefix-pinned pacman; the
+bundled pacman is patched so it never needs root. To pin a fixed snapshot
+instead of always getting the latest, point its `[msys-cross]` server at an
+archive tag — see [msys-mirror](msys-mirror/README.md).
 
 ## Targets
 
@@ -21,37 +77,10 @@ step with upstream MSYS2.
 | `x86_64-w64-mingw32` (clang64) | UCRT | host clang/lld wrapper |
 | `aarch64-w64-mingw32` (clangarm64) | UCRT | host clang/lld wrapper |
 
-binutils 2.46.0 across all targets. Each compiler is invoked with no special
-flags — `x86_64-w64-mingw32-gcc -o foo.exe foo.c`.
-
-## Install & use
-
-The only manual step is unpacking the bootstrap (a static, relocatable pacman
-plus the repo config); everything else is pulled on demand.
-
-```sh
-# 1. Unpack the bootstrap into a prefix of your choice.
-curl -L https://msys.kosaka.moe/repo/bootstrap.tar.xz | sudo tar -xJ -C /opt
-export PATH="/opt/msys2-cross/bin:$PATH"
-
-# 2. Install the toolchain(s) you want. Sysroot packages are pulled
-#    automatically via dependencies.
-msys-pacman -Sy
-msys-pacman -S msys-cross-mingw64-gcc      # or -mingw32-/-ucrt64-/-cygwin-gcc
-
-# 3. Compile.
-x86_64-w64-mingw32-gcc -o hello.exe hello.c
-```
-
-`msys-pacman` is a thin wrapper around a static pacman pinned to this prefix
-(`--root`/`--config`/`--dbpath`). The bundled pacman is patched so it does **not**
-require root, so once the prefix is writable by your user, upgrades are just
-`msys-pacman -Syu` — no `sudo`. (The very first install into a root-owned prefix
-still needs `sudo`; afterwards `chown` the prefix to your user.)
-
-To pin a specific snapshot instead of the rolling latest, point the
-`[msys-cross]` server at an archive tag — see
-[msys-mirror](msys-mirror/README.md).
+binutils 2.46.0 across all targets. The compilers are built with `zig cc`
+against a glibc 2.11 ABI (so they run on old and new Linux alike), and the
+Windows runtimes (headers, CRT, winpthreads, …) come straight from the official
+MSYS2 repositories rather than being rebuilt.
 
 ## How it's distributed
 
