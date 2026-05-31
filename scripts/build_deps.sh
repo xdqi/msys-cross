@@ -31,17 +31,30 @@ export LDFLAGS=""
 mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
 
 # ---- URL map for source tarballs ----
+# Each entry may list multiple space-separated URLs; they are tried in order.
+# Primary upstreams can be flaky from CI (gmplib.org has timed out from GitHub
+# runners), so a GNU/GCC-infrastructure mirror is listed as a fallback.
 declare -A DEPS_URL
-DEPS_URL[gmp-${GMP_VER}.tar.xz]="https://gmplib.org/download/gmp/gmp-${GMP_VER}.tar.xz"
-DEPS_URL[mpfr-${MPFR_VER}.tar.xz]="https://www.mpfr.org/mpfr-${MPFR_VER}/mpfr-${MPFR_VER}.tar.xz"
-DEPS_URL[mpc-${MPC_VER}.tar.gz]="https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz"
-DEPS_URL[isl-${ISL_VER}.tar.xz]="https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz"
-DEPS_URL[zlib-${ZLIB_VER}.tar.xz]="https://zlib.net/zlib-${ZLIB_VER}.tar.xz"
+DEPS_URL[gmp-${GMP_VER}.tar.xz]="https://gmplib.org/download/gmp/gmp-${GMP_VER}.tar.xz https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz https://gcc.gnu.org/pub/gcc/infrastructure/gmp-${GMP_VER}.tar.xz"
+DEPS_URL[mpfr-${MPFR_VER}.tar.xz]="https://www.mpfr.org/mpfr-${MPFR_VER}/mpfr-${MPFR_VER}.tar.xz https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"
+DEPS_URL[mpc-${MPC_VER}.tar.gz]="https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz https://www.multiprecision.org/downloads/mpc-${MPC_VER}.tar.gz"
+DEPS_URL[isl-${ISL_VER}.tar.xz]="https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz https://gcc.gnu.org/pub/gcc/infrastructure/isl-${ISL_VER}.tar.bz2"
+DEPS_URL[zlib-${ZLIB_VER}.tar.xz]="https://zlib.net/zlib-${ZLIB_VER}.tar.xz https://www.zlib.net/fossils/zlib-${ZLIB_VER}.tar.xz https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.xz"
 DEPS_URL[zstd-${ZSTD_VER}.tar.gz]="https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz"
 
 # Make a writable working copy of source tarballs
 WORK_DEPS="$PROJECT_ROOT/build/.deps-src"
 mkdir -p "$WORK_DEPS"
+
+# Robust download: bounded timeouts + retries, fail on HTTP errors, and try each
+# fallback URL in turn. Avoids the unbounded hang that produced curl exit 28 in
+# CI when the primary upstream stalls.
+fetch_url() {
+    local url="$1" dest="$2"
+    curl -fL --connect-timeout 20 --max-time 600 \
+        --retry 3 --retry-delay 3 --retry-all-errors \
+        -o "$dest" "$url"
+}
 
 get_tarball() {
     local fn="$1"
@@ -50,13 +63,23 @@ get_tarball() {
         cp "$DEPS_CACHE/$fn" "$WORK_DEPS/$fn"
         return 0
     fi
-    local url="${DEPS_URL[$fn]:-}"
-    if [ -z "$url" ]; then
+    local urls="${DEPS_URL[$fn]:-}"
+    if [ -z "$urls" ]; then
         echo "ERROR: No URL for $fn"
         return 1
     fi
-    echo "  Downloading $fn..."
-    curl -sLo "$WORK_DEPS/$fn" "$url"
+    local url
+    for url in $urls; do
+        echo "  Downloading $fn from $url ..."
+        if fetch_url "$url" "$WORK_DEPS/$fn.part"; then
+            mv "$WORK_DEPS/$fn.part" "$WORK_DEPS/$fn"
+            return 0
+        fi
+        echo "  ... failed, trying next mirror"
+        rm -f "$WORK_DEPS/$fn.part"
+    done
+    echo "ERROR: all mirrors failed for $fn"
+    return 1
 }
 
 cd "$WORK_DEPS"

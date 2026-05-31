@@ -51,8 +51,50 @@ jobs:
 
       # The repo is checked out as root but git refuses to operate on a tree owned
       # by another uid once builduser is involved; mark it safe pre-emptively.
+      # '*' also covers the MSYS2-packages submodule (rev-parse'd below).
       - name: Mark workspace as safe for git
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory '*'
+
+      # The gcc/binutils versions are NOT in our PKGBUILDs — inherit_msys2 greps
+      # them from the MSYS2-packages submodule at build time. So the pkg-source
+      # cache must key on the submodule's pinned commit, or a version bump there
+      # would silently reuse a cache of the old version's tarballs.
+      - name: Resolve MSYS2-packages submodule commit
+        id: submodule
+        run: |
+          sha="$(git -C deps/MSYS2-packages rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "MSYS2-packages @ $sha"
+
+      # Cache the downloaded source tarballs so a re-run doesn't re-fetch from
+      # upstream (gmplib.org etc. time out from runners — the original failure).
+      # get_tarball writes completed files only (.part + mv), so a cache save
+      # after a failed build never stores a truncated tarball.
+      #
+      # Static deps (gmp/mpfr/mpc/isl/zlib/zstd): keyed by build_deps.sh, which
+      # holds all the *_VER defaults — a version bump changes the hash → new cache.
+      - name: Cache static-dep source tarballs
+        uses: actions/cache@v4
+        with:
+          path: build/.deps-src
+          key: deps-src-${{ runner.os }}-${{ hashFiles('scripts/build_deps.sh') }}
+          restore-keys: |
+            deps-src-${{ runner.os }}-
+
+      # pkg sources (gcc/binutils upstream tarballs makepkg fetches into SRCDEST):
+      # keyed by the submodule commit (the real source of the gcc/binutils
+      # versions) AND the local pkgs/ (our PKGBUILDs + patches). Stale restores are
+      # safe — makepkg re-validates checksums and only re-downloads what changed.
+      - name: Cache pkg source tarballs
+        uses: actions/cache@v4
+        with:
+          path: build/sources
+          key: pkg-src-${{ runner.os }}-${{ steps.submodule.outputs.sha }}-${{ hashFiles('pkgs/**') }}
+          restore-keys: |
+            pkg-src-${{ runner.os }}-${{ steps.submodule.outputs.sha }}-
+            pkg-src-${{ runner.os }}-
 
       # build.sh frees each package's scratch BUILDDIR right after that package
       # is built, so peak disk is ~one toolchain build tree at a time rather than
