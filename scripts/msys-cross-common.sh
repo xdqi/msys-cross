@@ -70,7 +70,10 @@ inherit_msys2() {
 # (clang-only diagnostics that don't apply to GCC's code). Nothing to do here.
 
 setup_zig_env() {
-    export PATH="$_install_prefix/bin:$_zig_path:$_zig_path-x86_64-linux-0.16.0:$PATH"
+    # $_zig_path is the build/zig symlink prepare-zig.sh points at the versioned
+    # dir, so the version number lives in ONE place (prepare-zig.sh) — no need to
+    # also list a version-specific path here.
+    export PATH="$_install_prefix/bin:$_zig_path:$PATH"
     export CC="$_wrappers/zigcc"
     export CXX="$_wrappers/zigc++"
     export AR="zig ar"

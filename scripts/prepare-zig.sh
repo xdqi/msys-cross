@@ -7,10 +7,14 @@ set -euo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
-ZIG_VER="${1:-0.16.0}"
+ZIG_VER="${1:-0.17.0-dev.633+9c5655093}"
 ZIG_DIR="zig-x86_64-linux-$ZIG_VER"
 ZIG_TARBALL="$ZIG_DIR.tar.xz"
-ZIG_URL="https://ziglang.org/download/$ZIG_VER/$ZIG_TARBALL"
+# Tagged releases live under /download/<ver>/; dev (master) builds under /builds/.
+case "$ZIG_VER" in
+    *-dev.*) ZIG_URL="https://ziglang.org/builds/$ZIG_TARBALL" ;;
+    *)       ZIG_URL="https://ziglang.org/download/$ZIG_VER/$ZIG_TARBALL" ;;
+esac
 ZIG_INSTALL_DIR="$PROJECT_ROOT/build/zig-x86_64-linux-$ZIG_VER"
 
 mkdir -p "$PROJECT_ROOT/build"
