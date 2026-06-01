@@ -22,7 +22,7 @@ eval "$(declare -f _msys2_build | sed \
     -e '/CXXFLAGS=\${CXXFLAGS\/-pipe\/}/d' \
     -e "/export lt_cv_deplibs_check_method='pass_all'/d" \
     -e '/export MSYSTEM=CYGWIN/d' \
-    -e 's|--build=\${CHOST}|--build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=x86_64-pc-cygwin|' \
+    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}" --host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}" --target=x86_64-pc-cygwin|' \
     -e 's|--prefix=/usr|--prefix="${_stage_prefix}"|' \
     -e 's|--libexecdir=/usr/lib|--libexecdir="${_stage_prefix}/libexec"|' \
     -e 's|--enable-bootstrap|--disable-bootstrap|' \
@@ -130,6 +130,26 @@ build() {
     for _a in "$_bootstrap_prefix/usr/lib/w32api/"*.a; do
         ln -sf "w32api/$(basename "$_a")" "$_bootstrap_prefix/usr/lib/$(basename "$_a")" 2>/dev/null || true
     done
+
+    # Foreign-host (e.g. arm64 macOS) cross build: GCC's `all-gcc` specs pass runs the
+    # freshly built host xgcc (GCC_FOR_TARGET -dumpspecs), which can't execute on the
+    # Linux build machine. The dumped specs depend ONLY on the target, so override
+    # GCC_FOR_TARGET to the build-runnable x86_64-pc-cygwin gcc driver that
+    # prepare-build-sysroot.sh placed in $_bootstrap_prefix/specs-helper/bin (a fixed
+    # path, NOT on PATH). Single make, no reconfigure. (Mirrors the mingw msys-cross-gcc.)
+    if [ "${_MSYS_CROSS_DUMPSPECS:-0}" = 1 ]; then
+        export _MSYS_CROSS_SPECS_GCC="${_bootstrap_prefix}/specs-helper/bin/x86_64-pc-cygwin-gcc"
+        if [ ! -x "$_MSYS_CROSS_SPECS_GCC" ]; then
+            echo "ERROR: specs-helper gcc not found: $_MSYS_CROSS_SPECS_GCC" >&2
+            echo "       run prepare-build-sysroot.sh first (it fetches msys-cross-cygwin-gcc)." >&2
+            return 1
+        fi
+        # GCC_FOR_TARGET=<helper> covers both all-gcc steps that run the (unrunnable) host
+        # xgcc: the specs dump and the host self-tests. The helper carries its own cc1/cc1plus,
+        # so -dumpspecs emits identical target specs and -fself-test no-ops. (Mirrors msys-cross-gcc.)
+        eval "$(declare -f _msys2_build | sed \
+            -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_MSYS_CROSS_SPECS_GCC}" all-gcc#')"
+    fi
 
     _msys2_build
 }

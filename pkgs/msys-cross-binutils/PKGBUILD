@@ -87,9 +87,19 @@ _build_one() {
         _conf+=' --enable-64-bit-bfd'
     fi
 
+    # --build/--host default to the Linux build machine but are overridable via
+    # _MSYS_CROSS_BUILD / _MSYS_CROSS_HOST (e.g. host=aarch64-apple-darwin20 for a
+    # macOS-hosted cross binutils). host != build forces configure into cross mode,
+    # so it won't try to RUN the (non-native) conftest. The actual output arch is
+    # decided by the zig wrapper's target (ZIG_TARGET), independent of these labels.
+    # zlib: use the system libz on Linux (default), but allow opting out via
+    # _MSYS_CROSS_ZLIB="" so a host (e.g. macOS arm64) whose zig sysroot has no libz
+    # falls back to binutils' bundled in-tree zlib — no external dep prefix needed.
     "${srcdir}/binutils-${pkgver}/configure" \
-        --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target="$target" \
-        --prefix=/ --disable-werror --with-system-zlib \
+        --build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}" \
+        --host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}" \
+        --target="$target" \
+        --prefix=/ --disable-werror "${_MSYS_CROSS_ZLIB---with-system-zlib}" \
         $_conf
 
     make -j"$(nproc)" all-libiberty

@@ -10,7 +10,8 @@ inherit_msys2 "mingw-w64-cross-gcc"
 eval "$(declare -f _build | sed \
     -e 's|--prefix=/opt|--prefix="${_stage_prefix}"|g' \
     -e 's|--libexecdir=/opt/lib|--libexecdir="${_stage_prefix}/libexec"|g' \
-    -e 's|\${CHOST}|x86_64-linux-gnu|g' \
+    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}"|' \
+    -e 's|--host=\${CHOST}|--host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}"|' \
     -e 's|--with-{gmp,mpfr,mpc,isl}=/usr|--with-gmp='"$_deps"' --with-mpfr='"$_deps"' --with-mpc='"$_deps"' --with-isl='"$_deps"'|g' \
     -e 's|--enable-libgomp|--disable-libcc1 --enable-libgomp|g' \
     -e 's| fortran|,fortran|g' \
@@ -131,6 +132,37 @@ build() {
     rm -rf "$_stage_prefix/$_t"
     ln -sf "$_bootstrap_prefix/$_mct" "$_stage_prefix/$_t"
 
+    # Foreign-host (e.g. arm64 macOS) cross build: GCC's `all-gcc` includes the `specs`
+    # pass (`$(GCC_FOR_TARGET) -dumpspecs > specs`), where GCC_FOR_TARGET defaults to
+    # ./xgcc — the freshly built HOST compiler. When host != build and the host binary is
+    # a foreign format (arm64 Mach-O), the Linux build machine cannot run it. The dumped
+    # specs depend ONLY on the target, so we override GCC_FOR_TARGET for this one make to
+    # a build-runnable SAME-target gcc: the repo's own x86_64-linux-hosted
+    # msys-cross-<target>-gcc (PER TARGET — each target has its own specs). Single make,
+    # no reconfigure. _MSYS_CROSS_DUMPSPECS=1 enables it; unset = native build, unchanged.
+    if [ "${_MSYS_CROSS_DUMPSPECS:-0}" = 1 ]; then
+        # Build-runnable SAME-target gcc, used only to generate the target `specs` (see
+        # below). prepare-build-sysroot.sh pulls msys-cross-<target>-gcc from the
+        # msys-cross repo into $_bootstrap_prefix/specs-helper (a fixed path that is
+        # deliberately NOT on PATH, so it can never shadow the cross toolchain). We point
+        # at it by absolute path — no `command -v`, no dependence on build order/PATH.
+        export _MSYS_CROSS_SPECS_GCC="${_bootstrap_prefix}/specs-helper/bin/${_t}-gcc"
+        if [ ! -x "$_MSYS_CROSS_SPECS_GCC" ]; then
+            echo "ERROR: specs-helper gcc not found: $_MSYS_CROSS_SPECS_GCC" >&2
+            echo "       run prepare-build-sysroot.sh first (it installs msys-cross-<target>-gcc)." >&2
+            return 1
+        fi
+        # Inject GCC_FOR_TARGET=<helper> into the inherited _build's `make ... all-gcc`.
+        # Two all-gcc steps invoke GCC_FOR_TARGET and would otherwise run the freshly built
+        # HOST xgcc — unrunnable on Linux for a foreign host (arm64 Mach-O):
+        #   - `specs` rule: `$(GCC_FOR_TARGET) -dumpspecs > specs`
+        #   - host self-tests: `$(GCC_FOR_SELFTESTS=...$(GCC_FOR_TARGET)) -fself-test` (spawns cc1)
+        # Both depend ONLY on the target, so the build-runnable same-target helper handles
+        # them: -dumpspecs emits identical specs, and -fself-test no-ops ("self-tests are not
+        # enabled in this build") because the helper carries its own cc1/cc1plus backends.
+        eval "$(declare -f _build | sed \
+            -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_MSYS_CROSS_SPECS_GCC}" all-gcc#')"
+    fi
     _msys2_build
 }
 

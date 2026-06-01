@@ -38,7 +38,10 @@ export PATH="$INSTALL_PREFIX/bin:$PATH"
 # ---- Step 0: Install host build tools ----
 echo "=== Installing host build tools ==="
 pacman -Syu --noconfirm --noprogressbar 2>&1 | tail -2
-pacman -S --noconfirm --noprogressbar --needed base-devel curl git zstd sudo 2>&1 | tail -2
+# llvm: provides llvm-nm, which build_deps.sh uses as NM for cross targets — the host
+# GNU nm can't read a cross object (e.g. arm64 Mach-O), which breaks gmp's configure.
+# (Arch ships it at /usr/bin/llvm-nm; build_deps.sh's `command -v llvm-nm` finds it.)
+pacman -S --noconfirm --noprogressbar --needed base-devel curl git zstd sudo llvm 2>&1 | tail -2
 
 # Create unprivileged build user (makepkg refuses to run as root)
 if ! id builduser >/dev/null 2>&1; then

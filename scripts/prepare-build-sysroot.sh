@@ -91,6 +91,56 @@ _pacman -Sy \
     msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime \
     gcc
 
+echo "=== Fetching specs-helper gcc drivers (for darwin/foreign-host GCC builds) ==="
+# A Canadian-cross GCC build (build=linux, host=foreign e.g. arm64 macOS, target=mingw/
+# cygwin) can't run its own host xgcc for make's `specs` pass (GCC_FOR_TARGET -dumpspecs)
+# on the Linux build machine. The dumped specs depend ONLY on the target, so the GCC
+# PKGBUILDs override GCC_FOR_TARGET to a build-runnable same-target gcc: the project's own
+# x86_64-linux-hosted msys-cross-<target>-gcc.
+#
+# We need the gcc DRIVER + its backends (libexec cc1/cc1plus/lto1/collect2): `-dumpspecs`
+# only needs the driver, but GCC's `all-gcc` ALSO runs the host self-tests
+# (`$(GCC_FOR_SELFTESTS) -fself-test`), whose recipe invokes the driver which spawns cc1.
+# A driver-only helper makes that fail ("cannot execute 'cc1'"); with the backends present
+# the driver finds its relative ../libexec/.../cc1 and the self-test no-ops out ("self-tests
+# are not enabled in this build"). So extract bin/<triple>-gcc + libexec/gcc/** (~136 MB
+# each — still ~half the full ~1.2 GB package, and no deps, no root). Land them in
+# $OUT/specs-helper, a fixed path deliberately NOT on PATH so these build-time helpers can
+# never shadow the cross toolchain.
+SPECS_REPO="${MSYS_CROSS_REPO:-https://msys.kosaka.moe/repo}"
+SPECS_ROOT="$OUT/specs-helper"
+mkdir -p "$SPECS_ROOT/bin"
+# target subdir -> gcc triple (the driver name inside each package is <triple>-gcc).
+declare -A _SPECS_TRIPLE=(
+    [mingw32]=i686-w64-mingw32 [mingw64]=x86_64-w64-mingw32
+    [ucrt64]=x86_64-w64-mingw32ucrt [cygwin]=x86_64-pc-cygwin
+)
+# Resolve current package FILENAMEs from the repo db so versions track the repo (and
+# cygwin's distinct version is handled automatically — no hardcoding).
+_specs_tmp="$SPECS_ROOT/.dbtmp"
+rm -rf "$_specs_tmp"; mkdir -p "$_specs_tmp"
+if curl -fsSL --connect-timeout 20 --retry 3 "$SPECS_REPO/msys-cross.db" -o "$_specs_tmp/db.tar.gz" \
+   && tar xf "$_specs_tmp/db.tar.gz" -C "$_specs_tmp" 2>/dev/null; then
+    for _sub in mingw32 mingw64 ucrt64 cygwin; do
+        _tr="${_SPECS_TRIPLE[$_sub]}"
+        _fn=$(grep -hoE "msys-cross-${_sub}-gcc-[0-9][^/]*-x86_64\.pkg\.tar\.zst" "$_specs_tmp"/*/desc 2>/dev/null | sort -u | head -1)
+        if [ -z "$_fn" ]; then echo "  WARNING: no $_sub gcc in repo db (skip)"; continue; fi
+        if curl -fsSL --connect-timeout 30 --retry 3 "$SPECS_REPO/$_fn" -o "$_specs_tmp/pkg.zst" \
+           && bsdtar xf "$_specs_tmp/pkg.zst" -C "$SPECS_ROOT" \
+                "bin/${_tr}-gcc" "libexec/gcc" 2>/dev/null \
+           && [ -x "$SPECS_ROOT/bin/${_tr}-gcc" ]; then
+            echo "  + ${_tr}-gcc + libexec backends  (from $_fn)"
+        else
+            echo "  WARNING: failed to extract ${_tr}-gcc from $_fn"
+        fi
+        rm -f "$_specs_tmp/pkg.zst"
+    done
+    echo "  specs-helper drivers under $SPECS_ROOT/bin (NOT on PATH, drivers only)"
+else
+    echo "  WARNING: could not fetch $SPECS_REPO/msys-cross.db — darwin GCC builds will lack a GCC_FOR_TARGET proxy"
+fi
+rm -rf "$_specs_tmp"
+
 echo
 echo "=== Bootstrap prefix ready ==="
 echo "  BOOTSTRAP_PREFIX=$OUT"

@@ -17,7 +17,9 @@ ISL_VER="${ISL_VER:-0.27}"
 ZLIB_VER="${ZLIB_VER:-1.3.2}"
 ZSTD_VER="${ZSTD_VER:-1.5.7}"
 
-PREFIX="${DEPS_INSTALL:-$PROJECT_ROOT/deps/install}"
+# Per-target install prefix so each ZIG_TARGET's arch keeps its own static .a
+# (Linux x86_64 and macOS arm64 deps coexist). DEPS_INSTALL overrides explicitly.
+PREFIX="${DEPS_INSTALL:-$PROJECT_ROOT/deps/install-${ZIG_TARGET:-x86_64-linux-gnu.2.11}}"
 DEPS_CACHE="${DEPS_CACHE:-$PROJECT_ROOT/deps}"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -27,6 +29,15 @@ setup_zig_env
 export CFLAGS="-O2 -fPIC"
 export CXXFLAGS="-O2 -fPIC"
 export LDFLAGS=""
+
+# Some deps' configure (gmp) inspects an object with NM; the host's GNU nm can't read
+# a cross object (e.g. arm64 Mach-O → "file format not recognized"). zig has no `nm`,
+# so point NM at an llvm-nm (reads every format LLVM emits) when one is available.
+# Only matters for cross targets; on a native Linux build the host nm works too.
+if [ -z "${NM:-}" ]; then
+    _llvm_nm="$(command -v llvm-nm 2>/dev/null || ls /usr/lib/llvm-*/bin/llvm-nm /usr/bin/llvm-nm-* 2>/dev/null | sort -V | tail -1)"
+    [ -n "$_llvm_nm" ] && export NM="$_llvm_nm"
+fi
 
 mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
 
@@ -97,19 +108,28 @@ for a in "${TARBALLS[@]}"; do
 done
 
 do_build() {
-    local name="$1" dir="$2" extra="$3"
+    local name="$1" dir="$2" extra="$3" make_tgt="${4:-}" install_tgt="${5:-install}"
     echo "=== $name ==="
     mkdir -p "$WORK_DEPS/${name}-build" && cd "$WORK_DEPS/${name}-build"
     find . -name config.cache -delete 2>/dev/null || true
+    # host/build overridable (war-future, consistent with the PKGBUILDs): host != build
+    # puts autoconf in cross mode so it won't RUN the (non-native) conftest.
     ../$dir/configure --prefix="$PREFIX" --enable-static --disable-shared \
-        --build=x86_64-linux-gnu --host=x86_64-linux-gnu $extra
-    make -j"$JOBS" && make install
+        --build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}" \
+        --host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}" $extra
+    # make_tgt lets a dep build ONLY its library (skip noinst test programs) — needed
+    # for isl, whose C++ test progs pull legacy Mach-O libtool link flags on darwin and
+    # are pure waste here. Default (empty) = full `all` for the rest.
+    make -j"$JOBS" $make_tgt && make $install_tgt
 }
 
 do_build gmp  "gmp-${GMP_VER}" ""
 do_build mpfr "mpfr-${MPFR_VER}" "--with-gmp=$PREFIX --disable-float128"
 do_build mpc  "mpc-${MPC_VER}" "--with-gmp=$PREFIX --with-mpfr=$PREFIX"
-do_build isl  "isl-${ISL_VER}"  "--with-gmp-prefix=$PREFIX"
+# isl: build only libisl.la + install just the lib and headers (its noinst test progs
+# are unneeded and trip zig's ld on a darwin host).
+do_build isl  "isl-${ISL_VER}"  "--with-gmp-prefix=$PREFIX" \
+    "gitversion.h libisl.la" "install-libLTLIBRARIES install-nodist_pkgincludeHEADERS install-data"
 
 echo "=== zlib ==="
 mkdir -p "$WORK_DEPS/zlib-build" && cd "$WORK_DEPS/zlib-build"

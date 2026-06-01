@@ -8,6 +8,12 @@
 # implemented" / integer-pack errors when building GCC's .c-as-C++ units). Sourcing
 # keeps the dedup without that indirection.
 
+# The zig compilation target. Defaults to the canonical Linux glibc target; override
+# via the ZIG_TARGET env var to retarget the whole toolchain (e.g. aarch64-macos.11.0
+# for a macOS-hosted cross build). Both wrappers pass this verbatim to `zig cc/c++
+# -target`, and zig_sccache_reexec folds it into the sccache cache-buster (below).
+ZIG_CC_TARGET="${ZIG_TARGET:-x86_64-linux-gnu.2.11}"
+
 # zig_sccache_reexec "$@"
 # sccache two-role trick: sccache can't wrap the two-token `zig cc` directly, so the
 # wrapper re-execs as `sccache <self> "$@"` (outer role) and sccache then re-runs
@@ -21,6 +27,13 @@ zig_sccache_reexec() {
         local _sccache="${SCCACHE_PATH:-}"
         [ -z "$_sccache" ] && _sccache="$(command -v sccache 2>/dev/null || true)"
         if [ -n "$_sccache" ]; then
+            # sccache hashes the "compiler" via $0 = THIS wrapper script, whose bytes
+            # don't change when the real zig is upgraded, and it never sees the -target
+            # we inject internally. So two distinct compiles (different zig version, or
+            # different ZIG_TARGET) can collide on one cache key. Fold both into
+            # SCCACHE_C_CUSTOM_CACHE_BUSTER (a whitelisted CACHED_ENV_VAR, purpose-built
+            # for this) so the key is partitioned by real zig version AND target.
+            export SCCACHE_C_CUSTOM_CACHE_BUSTER="$(zig version 2>/dev/null):$ZIG_CC_TARGET"
             _ZIGCC_INNER=1 exec "$_sccache" "$0" "$@"
         fi
     fi
@@ -43,6 +56,10 @@ ZIG_WNO=(
 # can't parse (-Wconditionally-supported, -Wshadow=local — each would warn "unknown
 # warning option"). Functional -Werror=narrowing / -Wno-error=* forms are exact-match
 # and preserved. Also detect a compile invocation (-c/-E/-S).
+# Also drops legacy Mach-O libtool linker flags zig's ld rejects (-single_module,
+# -bind_at_load) — autoconf/libtool emit these on a darwin host (e.g. isl's test progs)
+# and they're harmless to omit. These tokens never appear on a Linux build, so the
+# Linux path is unaffected.
 # Outputs: ZIG_ARGS=(filtered args), ZIG_IS_COMPILE=true|false.
 zig_filter_args() {
     ZIG_ARGS=()
@@ -53,6 +70,7 @@ zig_filter_args() {
             -c|-E|-S) ZIG_IS_COMPILE=true ;;
             -Wall|-Wextra|-W|-Werror) continue ;;
             -Wconditionally-supported|-Wshadow=local) continue ;;
+            -single_module|-bind_at_load) continue ;;
         esac
         ZIG_ARGS+=("$a")
     done

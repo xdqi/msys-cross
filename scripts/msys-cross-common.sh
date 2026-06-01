@@ -20,7 +20,9 @@ _msys2_root="${MSYS2_PACKAGES:-$_project_root/deps/MSYS2-packages}"
 _bootstrap_prefix="${BOOTSTRAP_PREFIX:-$_project_root/build/bootstrap-prefix}"
 
 # Static build dependencies (gmp, mpfr, mpc, isl, zlib, zstd) from build_deps.sh.
-_deps="${DEPS:-$_project_root/deps/install}"
+# Per-target prefix so each ZIG_TARGET keeps its own arch's static .a (Linux x86_64
+# and macOS arm64 deps coexist). DEPS still overrides explicitly if set.
+_deps="${DEPS:-$_project_root/deps/install-${ZIG_TARGET:-x86_64-linux-gnu.2.11}}"
 
 # Install prefix: where built cross packages live during the build (binutils, GCC).
 # GCC build needs cross-as/ld in PATH from here.
@@ -80,5 +82,13 @@ setup_zig_env() {
     export RANLIB="zig ranlib"
     export CFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
     export CXXFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
-    export LDFLAGS="-L$_deps/lib -Wl,-Bstatic -lgmp -lmpfr -lmpc -lisl -lz -lzstd -Wl,-Bdynamic"
+    # Mach-O's ld has no -Bstatic/-Bdynamic. On a macOS target the deps prefix ships
+    # only static .a (no .dylib), so a plain -L suffices to link them statically; on
+    # Linux keep the GNU -Bstatic dance verbatim (byte-identical to before).
+    case "${ZIG_TARGET:-}" in
+        *macos*|*darwin*)
+            export LDFLAGS="-L$_deps/lib" ;;
+        *)
+            export LDFLAGS="-L$_deps/lib -Wl,-Bstatic -lgmp -lmpfr -lmpc -lisl -lz -lzstd -Wl,-Bdynamic" ;;
+    esac
 }
