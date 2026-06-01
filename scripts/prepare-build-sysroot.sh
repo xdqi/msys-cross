@@ -64,9 +64,9 @@ echo "=== Installing mingw32 sysroot ==="
 # retired upstream; the mingw32 repo has the i686 gcc but no gcc-fortran). pacman
 # aborts the WHOLE transaction on a single "target not found", and this script runs
 # under `set -e`, so we must NOT request the missing package — we install only
-# mingw-w64-i686-gcc here. The msys-cross-mingw32-gcc-fortran subpackage's
-# copy_sysroot_pkg call will then find nothing to copy (it just reports 0 files),
-# leaving the 32-bit Fortran subpackage effectively empty / host-driver-only.
+# mingw-w64-i686-gcc here. Correspondingly, msys-cross-gcc emits NO
+# msys-cross-mingw32-gcc-fortran package: there is no libgfortran to ship, so
+# mingw32 is C/C++ only.
 _pacman -Sy \
     mingw-w64-i686-headers mingw-w64-i686-crt \
     mingw-w64-i686-winpthreads mingw-w64-i686-gcc-libs \

@@ -20,18 +20,33 @@ eval "$(declare -f _build | sed \
     -e 's|--enable-version-specific-runtime-libs|--disable-version-specific-runtime-libs --with-pkgversion="msys2-cross ${pkgver}-${pkgrel}" --with-bugurl="https://github.com/xdqi/msys-cross/issues"|g' \
     -e 's|--enable-threads=\${_threads}|--enable-threads=posix|g' \
     -e 's|\bmake all\b|make -j"$(nproc)" all-gcc|g')"
+# all-gcc builds the host driver + backends (cc1/cc1plus/lto1/collect2/lto-wrapper)
+# + gcov/lto-dump, but NOT the target runtime libs. We deliberately do NOT build
+# c++tools (g++-mapper-server, the C++-modules network mapper daemon) or the
+# fixincludes install-tools: in a cross compiler those are effectively dead weight
+# (fixincludes patches the HOST system headers, which a cross toolchain never uses;
+# the file-based module mapper is the default and needs no server). We ship only
+# what users actually invoke: gcc/g++/cpp + the gcov coverage suite + lto-dump.
 
 # ---- Package metadata ----
 _our_pkgrel=1
 pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 
-# Optional: build a subset of targets for fast iteration, e.g.
-#   _MSYS_CROSS_TARGETS=mingw64 makepkg ...
-# Default = all three. Values are sysroot subdirs: mingw64 mingw32 ucrt64.
-# This narrows the pkgname array, the per-target sysroot-symlink loop in build(),
-# and the inherited _targetpkgs (which drives _msys2_build's _build loop), so an
-# unset env reproduces the previous behaviour exactly (all 3 targets, 6 packages).
-_mc_targets="${_MSYS_CROSS_TARGETS:-mingw64 mingw32 ucrt64}"
+# ---- Single-target build (one target per makepkg run) ----
+# _MSYS_CROSS_TARGET selects exactly ONE target subdir: mingw64 | mingw32 | ucrt64.
+# Default mingw64 so a bare `makepkg` / `makepkg --packagelist` is well-defined;
+# scripts/build.sh sets it explicitly once per target. The single value is the
+# lever for per-target DEBUG packages: pkgbase is set to this target's gcc package
+# below, so makepkg's native split emits "<pkgbase>-debug" =
+# msys-cross-<target>-gcc-debug (makepkg hardcodes the debug pkg name to
+# $pkgbase-debug, with no override variable — so per-target debug REQUIRES a
+# per-target pkgbase, i.e. one target per run).
+_mct="${_MSYS_CROSS_TARGET:-mingw64}"
+case "$_mct" in
+    mingw64|mingw32|ucrt64) ;;
+    *) echo "ERROR: _MSYS_CROSS_TARGET must be one of mingw64|mingw32|ucrt64 (got '$_mct')" >&2
+       return 1 2>/dev/null || exit 1 ;;
+esac
 
 # subdir → our host target triple (passed to _build / _package_one).
 _mc_triple() {
@@ -42,26 +57,22 @@ _mc_triple() {
     esac
 }
 
-# Override the inherited upstream pkgbase (mingw-w64-cross-gcc) so the split
-# debug package is named msys-cross-gcc-debug, not mingw-w64-cross-gcc-debug.
-pkgbase=msys-cross-gcc
-# Build the pkgname array from _mc_targets, preserving the canonical order
-# (mingw64, mingw32, ucrt64). Each selected subdir emits a -gcc + -gcc-fortran
-# package. Unset env → all 3 subdirs → the original 6 entries.
-pkgname=()
-for _sub in mingw64 mingw32 ucrt64; do
-    case " $_mc_targets " in *" $_sub "*) ;; *) continue ;; esac
-    pkgname+=("msys-cross-${_sub}-gcc" "msys-cross-${_sub}-gcc-fortran")
-done
-# Re-narrow the inherited upstream _targetpkgs so _msys2_build()'s build() loop
-# (for _pkg in "${_targetpkgs[@]}"; ... _build <triple>) compiles only the
-# selected targets. Upstream entries are "${_mingw_suff}-<subdir>-${_realname}"
-# (_mingw_suff/_realname are in scope after inherit_msys2).
-_targetpkgs=()
-for _sub in mingw64 mingw32 ucrt64; do
-    case " $_mc_targets " in *" $_sub "*) ;; *) continue ;; esac
-    _targetpkgs+=("${_mingw_suff}-${_sub}-${_realname}")
-done
+# Override the inherited upstream pkgbase (mingw-w64-cross-gcc) so the split debug
+# package is per-target: msys-cross-<target>-gcc-debug (not mingw-w64-cross-gcc-debug
+# nor a single all-target msys-cross-gcc-debug). This is the ONLY way to get
+# per-target debug packages — makepkg derives the debug pkg name from $pkgbase.
+pkgbase="msys-cross-${_mct}-gcc"
+# pkgname for THIS target only: the -gcc package, plus -gcc-fortran for the 64-bit
+# targets (mingw64/ucrt64). mingw32 ships no fortran: upstream MSYS2 has no
+# mingw-w64-i686-gcc-fortran (32-bit Fortran was dropped), so there is no
+# libgfortran in the sysroot to copy. makepkg appends the <pkgbase>-debug package
+# itself when options has both 'strip' and 'debug'.
+pkgname=("msys-cross-${_mct}-gcc")
+[ "$_mct" = mingw32 ] || pkgname+=("msys-cross-${_mct}-gcc-fortran")
+# Narrow the inherited upstream _targetpkgs to the single selected target so
+# _msys2_build()'s build() loop (for _pkg in "${_targetpkgs[@]}"; ... _build <triple>)
+# compiles ONLY this target. Upstream entries are "${_mingw_suff}-<subdir>-${_realname}".
+_targetpkgs=("${_mingw_suff}-${_mct}-${_realname}")
 arch=('x86_64')
 # strip + debug => small main packages + a separate *-debug package carrying the
 # split debug symbols (the cross-gcc binaries are host Linux ELF, so objcopy
@@ -113,14 +124,12 @@ build() {
     _stage_prefix="${srcdir}/stage"
     mkdir -p "$_stage_prefix"
 
-    # Per-target sysroot symlinks (xgcc needs headers/CRT for target libs).
-    # Only the targets selected via _MSYS_CROSS_TARGETS (default all 3) — matches
-    # the narrowed _targetpkgs that _msys2_build's _build loop iterates.
-    for _sub in $_mc_targets; do
-        _t="$(_mc_triple "$_sub")"
-        rm -rf "$_stage_prefix/$_t"
-        ln -sf "$_bootstrap_prefix/$_sub" "$_stage_prefix/$_t"
-    done
+    # Per-target sysroot symlink (xgcc needs headers/CRT for target libs).
+    # Single target ($_mct) — matches the narrowed _targetpkgs that _msys2_build's
+    # _build loop iterates.
+    _t="$(_mc_triple "$_mct")"
+    rm -rf "$_stage_prefix/$_t"
+    ln -sf "$_bootstrap_prefix/$_mct" "$_stage_prefix/$_t"
 
     _msys2_build
 }
@@ -163,9 +172,30 @@ _package_one() {
         fi
     done
 
+    # ---- gcov coverage suite + lto-dump: host tools the upstream full-install ships
+    # but our granular host install drops (their install lines live inside the
+    # install-common / lto.install-common recipe bodies, which we skip to keep Fortran
+    # out — there is no standalone install-gcov/install-lto-dump target). Install them
+    # by hand into the staged bin/. $target IS the program-transform prefix (configure
+    # sets program_transform_name = s&^&$target-&), so the names match upstream exactly.
+    # NOTE: we deliberately do NOT ship fixincludes' install-tools (fixincl/fixinc.sh/
+    # mkheaders) or g++-mapper-server — see the build() comment: dead weight in a cross
+    # toolchain. So no c++tools build and no fixincludes/install-mkheaders install here.
+    for _gt in gcov gcov-tool gcov-dump lto-dump; do
+        [ -f "gcc/$_gt" ] && install -Dm755 "gcc/$_gt" "${_staged}/bin/${target}-${_gt}" || true
+    done
+
     if [ -d "$_staged" ]; then
+        # Merge (cp -a + rm), not plain mv: if any install rule above leaked a few
+        # files straight to ${pkgdir}/<d> (e.g. a subdir Makefile with an unstaged
+        # libdir), a plain `mv` aborts with "Directory not empty". cp -a into the
+        # existing dir merges instead.
         for _d in bin lib libexec share; do
-            [ -e "$_staged/$_d" ] && mv "$_staged/$_d" "${pkgdir}/"
+            if [ -e "$_staged/$_d" ]; then
+                mkdir -p "${pkgdir}/$_d"
+                cp -a "$_staged/$_d/." "${pkgdir}/$_d/"
+                rm -rf "$_staged/$_d"
+            fi
         done
         # Target libs (libstdc++, libgcc_s, crt, etc.) come from MSYS2 native packages
         rm -rf "$_staged/$target"
@@ -259,15 +289,9 @@ package_msys-cross-mingw32-gcc() {
     _place_internal_libs "i686-w64-mingw32" mingw32
 }
 
-package_msys-cross-mingw32-gcc-fortran() {
-    pkgdesc="Cross GFortran for i686-w64-mingw32 target"
-    depends=(msys-cross-mingw32-gcc mingw-w64-i686-gcc-libs)
-    # libgfortran from the upstream mingw-w64-i686-gcc-fortran package in the
-    # sysroot. pacman may have resolved an older version (e.g. 15.2.0) for i686;
-    # we copy whatever it installed verbatim — the .mod module format and
-    # libgfortran SONAME are stable across recent GCC majors.
-    _package_one_fortran "i686-w64-mingw32"
-}
+# NOTE: no package_msys-cross-mingw32-gcc-fortran — upstream MSYS2 has no
+# mingw-w64-i686-gcc-fortran (32-bit Fortran was dropped), so there is no
+# libgfortran in the sysroot to copy. mingw32 ships C/C++ only.
 
 package_msys-cross-ucrt64-gcc() {
     pkgdesc="Cross GCC for x86_64-w64-mingw32ucrt target (gcc/g++)"

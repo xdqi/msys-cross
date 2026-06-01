@@ -60,6 +60,7 @@ run_as_builduser() {
         BOOTSTRAP_PREFIX="$BOOTSTRAP_PREFIX" INSTALL_PREFIX="$INSTALL_PREFIX" \
         PKGDEST="$PKGDEST" SRCDEST="$SRCDEST" LOGDEST="$LOGDEST" \
         ${BUILDDIR:+BUILDDIR="$BUILDDIR"} \
+        ${_MSYS_CROSS_TARGET:+_MSYS_CROSS_TARGET="$_MSYS_CROSS_TARGET"} \
         JOBS="$JOBS" \
         SCCACHE_PATH="${SCCACHE_PATH:-}" \
         SCCACHE_GHA_ENABLED="${SCCACHE_GHA_ENABLED:-}" \
@@ -90,14 +91,20 @@ run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
 build_pkg() {
     local pkg_dir="$1" makepkg_args="${2:--fCd --skippgpcheck}"
 
-    # Set up build directories (needed for --packagelist dry-run and actual build)
-    export BUILDDIR="$PROJECT_ROOT/build/$pkg_dir"
+    # Set up build directories (needed for --packagelist dry-run and actual build).
+    # Per-target packages (gcc/binutils, selected by _MSYS_CROSS_TARGET) get a
+    # target-suffixed BUILDDIR so the per-target build trees don't collide and the
+    # post-build `rm -rf "$BUILDDIR"` reclaims each target's tree independently.
+    export BUILDDIR="$PROJECT_ROOT/build/$pkg_dir${_MSYS_CROSS_TARGET:+-$_MSYS_CROSS_TARGET}"
     mkdir -p "$BUILDDIR" "$PKGDEST" "$SRCDEST" "$LOGDEST"
     chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST"
 
-    # Compute expected output packages via makepkg --packagelist (dry-run)
+    # Compute expected output packages via makepkg --packagelist (dry-run). Forward
+    # _MSYS_CROSS_TARGET (runuser scrubs env) so the dry-run names match the build.
     local pkglist
-    pkglist=$(cd "$PROJECT_ROOT/pkgs/$pkg_dir" && runuser -u builduser -- makepkg --packagelist 2>/dev/null) || true
+    pkglist=$(cd "$PROJECT_ROOT/pkgs/$pkg_dir" && runuser -u builduser -- env \
+                ${_MSYS_CROSS_TARGET:+_MSYS_CROSS_TARGET="$_MSYS_CROSS_TARGET"} \
+                makepkg --packagelist 2>/dev/null) || true
 
     # Skip if all expected packages already exist
     local all_exist=true
@@ -154,8 +161,15 @@ install_local "msys-cross-pacman-*.pkg.tar.*"
 build_pkg "msys-cross-pkgconfig"
 install_local "msys-cross-pkgconfig-*.pkg.tar.*"
 
-# Binutils (GCC needs as/ld in PATH)
-build_pkg "msys-cross-binutils"
+# Binutils (GCC needs as/ld in PATH). One makepkg run per target so each gets its
+# own per-target -debug package (msys-cross-<target>-binutils-debug); the shared
+# binutils-common rides the mingw64 run. _MSYS_CROSS_TARGET is exported for the
+# whole iteration (build_pkg + run_as_builduser pick it up); unset after the loop.
+for _t in mingw64 mingw32 ucrt64 cygwin; do
+    export _MSYS_CROSS_TARGET="$_t"
+    build_pkg "msys-cross-binutils"
+done
+unset _MSYS_CROSS_TARGET
 
 install_local "msys-cross-binutils-common-*.pkg.tar.*"
 install_local "msys-cross-mingw64-binutils-*.pkg.tar.*"
@@ -163,8 +177,14 @@ install_local "msys-cross-mingw32-binutils-*.pkg.tar.*"
 install_local "msys-cross-ucrt64-binutils-*.pkg.tar.*"
 install_local "msys-cross-cygwin-binutils-*.pkg.tar.*"
 
-# GCC (mingw64/32/ucrt)
-build_pkg "msys-cross-gcc"
+# GCC (mingw64/32/ucrt). One makepkg run per target so each gets its own per-target
+# -debug package (msys-cross-<target>-gcc-debug); a target's -gcc and -gcc-fortran
+# sub-packages share that one -debug. mingw32 has no fortran sub-package.
+for _t in mingw64 mingw32 ucrt64; do
+    export _MSYS_CROSS_TARGET="$_t"
+    build_pkg "msys-cross-gcc"
+done
+unset _MSYS_CROSS_TARGET
 
 install_local "msys-cross-mingw64-gcc-*.pkg.tar.*"
 install_local "msys-cross-mingw32-gcc-*.pkg.tar.*"

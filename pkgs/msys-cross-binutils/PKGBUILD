@@ -19,25 +19,41 @@ done
 _our_pkgrel=1
 pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 
-pkgname=(
-    msys-cross-binutils-common
-    msys-cross-mingw64-binutils
-    msys-cross-mingw32-binutils
-    msys-cross-ucrt64-binutils
-    msys-cross-cygwin-binutils
-)
+# ---- Single-target build (one target per makepkg run) ----
+# _MSYS_CROSS_TARGET selects exactly ONE target: mingw64 | mingw32 | ucrt64 | cygwin.
+# Default mingw64 so a bare `makepkg` / `makepkg --packagelist` is well-defined;
+# scripts/build.sh sets it explicitly once per target. The single value drives the
+# per-target DEBUG package: pkgbase is set to this target's binutils package below,
+# so makepkg's native split emits "<pkgbase>-debug" = msys-cross-<target>-binutils-debug
+# (makepkg hardcodes the debug pkg name to $pkgbase-debug — per-target debug
+# REQUIRES a per-target pkgbase, i.e. one target per run).
+_mct="${_MSYS_CROSS_TARGET:-mingw64}"
+
+# _mct → host target triple + MSYS2 sysroot subdir.
+case "$_mct" in
+    mingw64) _mct_triple=x86_64-w64-mingw32;     _mct_subdir=mingw64 ;;
+    mingw32) _mct_triple=i686-w64-mingw32;       _mct_subdir=mingw32 ;;
+    ucrt64)  _mct_triple=x86_64-w64-mingw32ucrt; _mct_subdir=ucrt64 ;;
+    cygwin)  _mct_triple=x86_64-pc-cygwin;       _mct_subdir=usr ;;
+    *) echo "ERROR: _MSYS_CROSS_TARGET must be mingw64|mingw32|ucrt64|cygwin (got '$_mct')" >&2
+       return 1 2>/dev/null || exit 1 ;;
+esac
+
+# Override the inherited upstream pkgbase so the split debug package is per-target:
+# msys-cross-<target>-binutils-debug (not a single all-target debug package).
+pkgbase="msys-cross-${_mct}-binutils"
+# pkgname for THIS target only: the <target>-binutils package. The target-independent
+# binutils-common (BFD plugins, shared by every binutils) rides along with the
+# mingw64 run. makepkg appends <pkgbase>-binutils-debug itself (strip+debug options).
+# binutils-common carries no host ELF binaries (only lib/bfd-plugins/libdep.so, a
+# target .so), so it contributes nothing to the mingw64 -debug package.
+pkgname=("msys-cross-${_mct}-binutils")
+[ "$_mct" = mingw64 ] && pkgname=("msys-cross-binutils-common" "${pkgname[@]}")
 arch=('x86_64')
-# strip + debug => small main packages + a separate *-debug package carrying the
-# split debug symbols (the cross-tool binaries are host Linux ELF, so objcopy
+# strip + debug => small main package + a separate <pkgbase>-debug package carrying
+# the split debug symbols (the cross-tool binaries are host Linux ELF, so objcopy
 # --only-keep-debug applies normally). Preserve the inherited upstream flags.
 options=('strip' 'debug' 'staticlibs' '!distcc' '!ccache' '!buildflags')
-
-# ---- Target map ----
-declare -A _target_subdir
-_target_subdir[x86_64-w64-mingw32]=mingw64
-_target_subdir[i686-w64-mingw32]=mingw32
-_target_subdir[x86_64-w64-mingw32ucrt]=ucrt64
-_target_subdir[x86_64-pc-cygwin]=usr
 
 _bintools=(addr2line ar as c++filt dlltool dllwrap elfedit gprof ld ld.bfd
            nm objcopy objdump ranlib readelf size strings strip windmc windres)
@@ -73,12 +89,10 @@ _build_one() {
     make -j"$(nproc)"
 }
 
-# ---- build() — 4 targets ----
+# ---- build() — single target ($_mct) ----
 build() {
     setup_zig_env
-    for t in x86_64-w64-mingw32ucrt i686-w64-mingw32 x86_64-w64-mingw32 x86_64-pc-cygwin; do
-        _build_one "$t"
-    done
+    _build_one "$_mct_triple"
 }
 
 # ---- _package_one(target, subdir) — install, rearrange, clean ----
