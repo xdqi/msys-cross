@@ -3,7 +3,7 @@ _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pkgname=msys-cross-pacman
 # Upstream archlinuxcn build of Morganamilo's static pacman.
 pkgver=7.1.0.r9.g54d9411
-pkgrel=3
+pkgrel=4
 pkgdesc="Static, non-root-patched pacman + wrapper for msys2-cross bootstrap"
 arch=('x86_64')
 options=('!strip')
@@ -11,10 +11,14 @@ depends=('msys-cross-filesystem' 'msys-cross-ca-certificates')
 backup=('etc/pacman.d/pacman.conf')
 
 # pacman-static binary comes from the archlinuxcn repo (Morganamilo's musl build,
-# repackaged). We extract usr/bin/pacman-static and binary-patch out the hard root
-# requirement (see patch-pacman-nonroot.sh) so the bootstrap can install into a
-# user-owned prefix without fakeroot. The distro pkgrel (-27) is baked into the
-# URL; if archlinuxcn re-packages, this 404s — bump _aur_pkgrel + the sha256.
+# repackaged). We extract usr/bin/pacman-static and binary-patch three behaviours
+# (see patch-pacman-nonroot.sh): (A) drop the hard root requirement, (B) clear
+# ARCHIVE_EXTRACT_OWNER so extraction never chowns, and (C) redirect the system
+# alpm hook dir to an empty path so no MSYS2/Windows package hook (rebase,
+# install-info.exe, ...) can Exec on the Linux bootstrap host. The bootstrap can
+# then install into a user-owned prefix without fakeroot. The distro pkgrel (-27)
+# is baked into the URL; if archlinuxcn re-packages, this 404s — bump _aur_pkgrel
+# + the sha256.
 _aur_pkgrel=27
 source=("pacman-static-${pkgver}-${_aur_pkgrel}-x86_64.pkg.tar.xz::https://repo.archlinuxcn.org/x86_64/pacman-static-${pkgver}-${_aur_pkgrel}-x86_64.pkg.tar.xz"
         "patch-pacman-nonroot.sh"
@@ -40,8 +44,33 @@ check() {
     # makepkg runs as an unprivileged user, so this is a genuine non-root test:
     # the patched binary must get PAST the root gate (no "unless you are root"
     # error) and reach the "Synchronizing package databases" stage. A future
-    # archlinuxcn rebuild that moves the patch site is caught here.
+    # archlinuxcn rebuild that moves any patch site is caught here.
     [ "$(id -u)" -ne 0 ] || { echo "check(): refusing to validate as root"; return 1; }
+
+    # Patch B (extract owner): assert the extract-flags immediate inside
+    # perform_extraction() now reads 0x196 (OWNER cleared). Anchored on the named
+    # symbol so the unrelated second archive_write_disk_set_options call site (which
+    # passes its flags via a register) can't confuse the match. No network.
+    local flag_imm
+    flag_imm=$(objdump -d --disassemble=perform_extraction --no-show-raw-insn \
+        "$srcdir/pacman-static" 2>/dev/null | grep -oE '\$0x19[67]' | head -1)
+    if [ "$flag_imm" != '$0x196' ]; then
+        echo "check(): FAILED — perform_extraction flags = ${flag_imm:-?}, expected \$0x196 (OWNER not cleared)" >&2
+        return 1
+    fi
+    echo "check(): OK — ARCHIVE_EXTRACT_OWNER cleared (flags 0x196)"
+
+    # Patch C (syshookdir): the inert .nope path must be present and the original
+    # system hook dir must be gone, so no packaged Windows hook can ever run.
+    if ! strings "$srcdir/pacman-static" | grep -qF '/usr/share/libalpm/.nope/'; then
+        echo "check(): FAILED — redirected hook dir (.nope) not found" >&2
+        return 1
+    fi
+    if strings "$srcdir/pacman-static" | grep -qF '/usr/share/libalpm/hooks/'; then
+        echo "check(): FAILED — original system hook dir still present" >&2
+        return 1
+    fi
+    echo "check(): OK — system hook dir redirected to .nope"
 
     local root="$srcdir/_checkroot"
     rm -rf "$root"
