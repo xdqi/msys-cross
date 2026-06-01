@@ -15,8 +15,8 @@ eval "$(declare -f _build | sed \
     -e 's|--enable-libgomp|--disable-libcc1 --enable-libgomp|g' \
     -e 's| fortran|,fortran|g' \
     -e '/export lt_cv_deplibs_check_method/d' \
-    -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
-    -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
+    -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error '"$_ZIG_QUIET_FLAGS"'"|g' \
+    -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error '"$_ZIG_QUIET_FLAGS"'"|g' \
     -e 's|--enable-version-specific-runtime-libs|--disable-version-specific-runtime-libs --with-pkgversion="msys2-cross ${pkgver}-${pkgrel}" --with-bugurl="https://github.com/xdqi/msys-cross/issues"|g' \
     -e 's|--enable-threads=\${_threads}|--enable-threads=posix|g' \
     -e 's|\bmake all\b|make -j"$(nproc)" all-gcc|g')"
@@ -54,98 +54,20 @@ for p in "${_chimera_patches[@]}"; do
     sha256sums+=('SKIP')
 done
 
-# ---- Upstream MSYS2 target runtime libs (all 3 mingw targets) ----
-# Instead of compiling libgcc/libstdc++/libgfortran/crt with the freshly-built
-# xgcc (make all-target...), we build only the host compiler (make all-gcc) and
-# bundle the version-matched runtime libs extracted from the upstream MSYS2
-# binary packages. PIN these external binaries (the rest of the project SKIPs).
-#
-# Version note: the C/C++ gcc base packages are all gcc-16.1.0-5 (matches our
-# pkgver=16.1.0). gcc-fortran is 16.1.0-1 for mingw64 and ucrt64, but MSYS2 has
-# NOT published a gcc-fortran 16.1.0 for the 32-bit i686 target — the newest
-# i686 gcc-fortran is 15.2.0-14. The intrinsic-module format ("GFORTRAN module
-# version '16'") and libgfortran SONAME (libgfortran-5) are identical across
-# GCC 15 and 16, so the 15.2.0 i686 libgfortran/.mod link against our 16.1.0
-# host f951; _package_one_fortran relocates the upstream 15.2.0 gcc-internal
-# dir to our 16.1.0 path (see the _libver arg).
-source+=("https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-gcc-16.1.0-5-any.pkg.tar.zst")
-sha256sums+=('10f7c55275f7fbe7924209d61c368a1a6fcf775cffbdeac2eef1f5ccacdd35cd')
-source+=("https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst")
-sha256sums+=('67b994f2fabcd63ec48bcb8028066c17364157597e29be0573903d9e64f08271')
-source+=("https://repo.msys2.org/mingw/mingw32/mingw-w64-i686-gcc-16.1.0-5-any.pkg.tar.zst")
-sha256sums+=('c945e6fa308b6077ec50c1c628990e24d719af872daf484884668efc21dcfbde')
-source+=("https://repo.msys2.org/mingw/mingw32/mingw-w64-i686-gcc-fortran-15.2.0-14-any.pkg.tar.zst")
-sha256sums+=('dc80081744cee484cf5bbf5aa932016542825dc35dca2328522d37b943af4ffd')
-source+=("https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gcc-16.1.0-5-any.pkg.tar.zst")
-sha256sums+=('2b5be791133f5fafac2537ad9d1579c9a421b791d7bf57fba6fb54484ec59622')
-source+=("https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst")
-sha256sums+=('07a33ee5d7cd5918cbc82ca58de515e247d02c0926d925d0189f0f4ba8cceb83')
+# ---- Target runtime libs come from the build sysroot (no download here) ----
+# msys-cross-gcc builds ONLY the host compiler (make all-gcc). The TARGET runtime
+# libraries (libgcc/crt, libstdc++, libgfortran, C++ headers, finclude .mod) are
+# supplied by the upstream MSYS2 gcc + gcc-fortran packages that
+# prepare-build-sysroot.sh installs into the build sysroot via pacman. The package
+# functions below COPY those files out of the sysroot (copy_sysroot_pkg, using
+# `pacman -Ql`), so pacman resolves the correct per-target version/triple/layout
+# and no source URLs / sha256 pins / version quirks are needed here.
 
-# ---- Override: make patching tolerant (GCC 15.2.0 may already have some files) ----
+# ---- Override: make patching tolerant (a patch may already be partly applied) ----
 apply_patch_with_msg() {
     for _fname in "$@"; do
         msg2 "Applying ${_fname}"
         patch -Nbp1 -i "${srcdir}"/${_fname} || true
-    done
-}
-
-# ---- Target map ----
-declare -A _target_subdir
-_target_subdir[x86_64-w64-mingw32]=mingw64
-_target_subdir[i686-w64-mingw32]=mingw32
-_target_subdir[x86_64-w64-mingw32ucrt]=ucrt64
-
-# ---- _relocate_internal_dirs — fix up upstream<->host gcc-internal path drift ----
-# extract_target_libs reads/writes ONE triple and ONE version dir. Two targets
-# need post-hoc relocation because the upstream MSYS2 package layout doesn't line
-# up with what our host-built driver searches:
-#
-#   * ucrt64: our host gcc is configured --target=x86_64-w64-mingw32ucrt, so the
-#     driver searches lib/gcc/x86_64-w64-mingw32ucrt/<ver> and
-#     include/c++/<ver>/x86_64-w64-mingw32ucrt/. But the upstream ucrt64 package
-#     stores those bits under the *plain* triple x86_64-w64-mingw32 (MSYS2 builds
-#     ucrt with the same triple as mingw64, distinguished only by sysroot). So we
-#     extract with the upstream triple, then rename x86_64-w64-mingw32 ->
-#     x86_64-w64-mingw32ucrt in every gcc-internal location.
-#
-#   * mingw32 fortran: MSYS2 never published gcc-fortran 16.1.0 for i686 (newest
-#     is 15.2.0-14). We extract that, then rename the upstream 15.2.0 gcc-internal
-#     dir to our 16.1.0 path so the host f951 finds the intrinsic .mod files
-#     (module format is identical across GCC 15/16, verified).
-#
-# Args: <pkgdir> <subdir> <upstream-triple> <our-triple> <upstream-ver> <our-ver>
-# Renames are no-ops when the names already match (the common mingw64 case), so
-# this is safe to call unconditionally.
-_relocate_internal_dirs() {
-    local pkgdir=$1 subdir=$2 up_triple=$3 our_triple=$4 up_ver=$5 our_ver=$6
-    local base d up_path our_path
-    # gcc-internal version-specific dirs (root + sysroot-subdir copies) and the
-    # C++ target-config header dir all key off <triple>/<ver>.
-    for base in \
-        "$pkgdir/lib/gcc" \
-        "$pkgdir/$subdir/lib/gcc" \
-        "$pkgdir/$subdir/include/c++"
-    do
-        [ -d "$base" ] || continue
-        case "$base" in
-            */include/c++)
-                # layout: include/c++/<ver>/<triple>/bits/...  (triple is the leaf)
-                up_path="$base/$up_ver/$up_triple"
-                our_path="$base/$our_ver/$our_triple"
-                ;;
-            *)
-                # layout: lib/gcc/<triple>/<ver>/...
-                up_path="$base/$up_triple/$up_ver"
-                our_path="$base/$our_triple/$our_ver"
-                ;;
-        esac
-        if [ -d "$up_path" ] && [ "$up_path" != "$our_path" ]; then
-            mkdir -p "$our_path"
-            cp -a "$up_path/." "$our_path/"
-            rm -rf "$up_path"
-            # prune now-empty upstream parent (e.g. the stale <triple> or <ver> dir)
-            rmdir -p "$(dirname "$up_path")" 2>/dev/null || true
-        fi
     done
 }
 
@@ -229,43 +151,27 @@ _package_one() {
 
     rm -rf "${pkgdir}/share"
     find "${pkgdir}" -name "*.exe" -delete
-
-    # Ensure -lgcc_s resolves. GCC make install produces libgcc.a (static)
-    # but not always libgcc_s.a; ld needs both since GCC links with -lgcc_s -lgcc.
-    local _verlib="${pkgdir}/lib/gcc/${target}/${pkgver}"
-    if [ -f "$_verlib/libgcc_s.a" ] && [ ! -L "$_verlib/libgcc_s.a" ]; then
-        mv "$_verlib/libgcc_s.a" "${pkgdir}/lib/libgcc_s.a"
-        ln -sf ../../../libgcc_s.a "$_verlib/libgcc_s.a"
-    elif [ ! -f "$_verlib/libgcc_s.a" ] && [ -f "$_verlib/libgcc.a" ]; then
-        ln -sf libgcc.a "$_verlib/libgcc_s.a"
-    fi
 }
 
 # ---- _package_one_fortran — gfortran driver + f951 backend (host) + libgfortran ----
 # Fortran subpackage: gfortran driver + f951 backend (host) + libgfortran (target,
-# repackaged from upstream). Split out so users who don't need Fortran install
+# copied from the build sysroot). Split out so users who don't need Fortran install
 # only the smaller -gcc package. Mirrors upstream native package_gcc-fortran():
 # fortran.install-common installs the gfortran driver; f951 is installed by hand
 # (the build Makefile only installs it via install-common's COMPILERS loop, which
 # we deliberately don't run here); libgfortran.a/.dll.a/.spec + finclude .mod
-# files come from the upstream -gcc-fortran binary package.
-# Args: <our-target-triple> <upstream-fortran-pkg> <sysroot-subdir> \
-#       [<upstream-triple>] [<upstream-ver>]
+# files come from the upstream mingw-w64-<arch>-gcc-fortran package that
+# prepare-build-sysroot.sh installed into the build sysroot.
+# Args: <our-target-triple> <upstream-pkgname> <sysroot-subdir>
 #   * <our-target-triple>  — the triple our host gcc was configured with
 #     (x86_64-w64-mingw32 / i686-w64-mingw32 / x86_64-w64-mingw32ucrt); names the
-#     build dir, the host f951 dest, and the path the driver searches.
-#   * <sysroot-subdir>     — mingw64/mingw32/ucrt64 (the dir name inside the
-#     upstream package AND the installed filesystem symlink target).
-#   * <upstream-triple>    — triple the upstream package stores its gcc-internal
-#     bits under (defaults to <our-target-triple>; differs for ucrt64, which MSYS2
-#     ships under the plain x86_64-w64-mingw32 triple).
-#   * <upstream-ver>       — gcc version inside the upstream package (defaults to
-#     $pkgver; the i686 gcc-fortran is 15.2.0, not 16.1.0).
-# After extraction, _relocate_internal_dirs renames the upstream triple/version
-# gcc-internal dirs to the ones our driver searches (no-op when they match).
+#     build dir and the host f951 dest.
+#   * <upstream-pkgname>   — mingw-w64-<arch>-gcc-fortran (whatever pacman resolved
+#     in the sysroot; copy_sysroot_pkg copies its files verbatim).
+#   * <sysroot-subdir>     — mingw64/mingw32/ucrt64 (the installed filesystem
+#     symlink target the cross-gcc search path resolves <target> to).
 _package_one_fortran() {
     local target=$1 fpkg=$2 subdir=$3
-    local up_triple="${4:-$target}" up_ver="${5:-$pkgver}"
     cd "${srcdir}/gcc-build-${target}"
     make -C gcc -j1 DESTDIR="${pkgdir}" fortran.install-common
     local _pfx="${_stage_prefix:-${srcdir}/stage}"
@@ -284,11 +190,10 @@ _package_one_fortran() {
     fi
     rm -rf "${pkgdir}/share"
     find "${pkgdir}" -name "*.exe" -delete
-    # libgfortran.a/.dll.a/.spec + finclude/.mod + libcaf_*.a from upstream -gcc-fortran.
-    # Extract under the UPSTREAM triple/ver (what's actually in the package), then
-    # relocate to our target triple / $pkgver.
-    extract_target_libs "$srcdir/$fpkg" "$up_triple" "$up_ver" "$pkgdir" "" "$subdir"
-    _relocate_internal_dirs "$pkgdir" "$subdir" "$up_triple" "$target" "$up_ver" "$pkgver"
+    # libgfortran.a/.dll.a/.spec + finclude/.mod + libcaf_*.a: copy the upstream
+    # gcc-fortran package's files out of the sysroot (pacman -Ql); pacman already
+    # resolved the right version/triple/layout, so no relocation is needed.
+    copy_sysroot_pkg "$_bootstrap_prefix" "$fpkg" "$pkgdir"
 }
 
 package_msys-cross-mingw64-gcc() {
@@ -298,17 +203,11 @@ package_msys-cross-mingw64-gcc() {
              mingw-w64-x86_64-winpthreads mingw-w64-x86_64-gcc-libs
              mingw-w64-x86_64-zlib mingw-w64-x86_64-windows-default-manifest)
     _package_one "x86_64-w64-mingw32"
-    # _package_one moves bin/lib/libexec out of the stage prefix to the package
-    # root (the package installs at "/"), so the extracted target libs must also
-    # land at the package root — pass "" as the stage-prefix arg, not
-    # $_stage_prefix (which now points at the already-drained stage subtree).
-    # The runtime libs/headers go under the MSYS2 sysroot subdir (mingw64), which
-    # the filesystem package's "x86_64-w64-mingw32 -> mingw64" symlink resolves
-    # the cross-gcc search path to (avoids a real-dir vs symlink install clash).
-    # C/C++ libs only — libgfortran moves to the -gcc-fortran subpackage.
-    extract_target_libs \
-        "$srcdir/mingw-w64-x86_64-gcc-16.1.0-5-any.pkg.tar.zst" \
-        "x86_64-w64-mingw32" "$pkgver" "$pkgdir" "" "mingw64"
+    # Target libs (libgcc/crt, libstdc++, C++ headers) come from the upstream
+    # mingw-w64-x86_64-gcc package installed in the build sysroot. They land under
+    # the MSYS2 sysroot subdir (mingw64), which the filesystem package's
+    # "x86_64-w64-mingw32 -> mingw64" symlink resolves the cross-gcc search path to.
+    copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-x86_64-gcc" "$pkgdir"
 }
 
 package_msys-cross-mingw64-gcc-fortran() {
@@ -324,25 +223,19 @@ package_msys-cross-mingw32-gcc() {
              mingw-w64-i686-winpthreads mingw-w64-i686-gcc-libs
              mingw-w64-i686-zlib mingw-w64-i686-windows-default-manifest)
     _package_one "i686-w64-mingw32"
-    # C/C++ target libs from upstream i686 gcc. The i686 build triple equals the
-    # upstream package triple (i686-w64-mingw32) and version (16.1.0), so a plain
-    # extraction lands everything at the path the driver searches — no relocation.
-    extract_target_libs \
-        "$srcdir/mingw-w64-i686-gcc-16.1.0-5-any.pkg.tar.zst" \
-        "i686-w64-mingw32" "$pkgver" "$pkgdir" "" "mingw32"
+    # C/C++ target libs from the upstream mingw-w64-i686-gcc package in the sysroot.
+    copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-i686-gcc" "$pkgdir"
 }
 
 package_msys-cross-mingw32-gcc-fortran() {
     pkgdesc="Cross GFortran for i686-w64-mingw32 target"
     depends=(msys-cross-mingw32-gcc mingw-w64-i686-gcc-libs)
-    # MSYS2 has no gcc-fortran 16.1.0 for i686; newest is 15.2.0-14. The .mod
-    # module format and libgfortran SONAME are stable across GCC 15/16, so the
-    # 15.2.0 libgfortran/.mod link against our 16.1.0 host f951. Pass the upstream
-    # triple (== our triple here) and the upstream version 15.2.0 so the extracted
-    # gcc-internal dir is relocated from 15.2.0 to our 16.1.0 search path.
+    # libgfortran from the upstream mingw-w64-i686-gcc-fortran package in the
+    # sysroot. pacman may have resolved an older version (e.g. 15.2.0) for i686;
+    # we copy whatever it installed verbatim — the .mod module format and
+    # libgfortran SONAME are stable across recent GCC majors.
     _package_one_fortran "i686-w64-mingw32" \
-        "mingw-w64-i686-gcc-fortran-15.2.0-14-any.pkg.tar.zst" "mingw32" \
-        "i686-w64-mingw32" "15.2.0"
+        "mingw-w64-i686-gcc-fortran" "mingw32"
 }
 
 package_msys-cross-ucrt64-gcc() {
@@ -352,25 +245,42 @@ package_msys-cross-ucrt64-gcc() {
              mingw-w64-ucrt-x86_64-winpthreads mingw-w64-ucrt-x86_64-gcc-libs
              mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-windows-default-manifest)
     _package_one "x86_64-w64-mingw32ucrt"
-    # C/C++ target libs from upstream ucrt64 gcc. MSYS2 stores the ucrt gcc-internal
-    # bits under the PLAIN triple x86_64-w64-mingw32 (not mingw32ucrt), so extract
-    # under that triple then relocate to our x86_64-w64-mingw32ucrt search path
-    # (lib/gcc/<triple>/<ver> + include/c++/<ver>/<triple>). Runtime libs land in
-    # ucrt64/lib, which is triple-independent and reached via the symlink.
-    extract_target_libs \
-        "$srcdir/mingw-w64-ucrt-x86_64-gcc-16.1.0-5-any.pkg.tar.zst" \
-        "x86_64-w64-mingw32" "$pkgver" "$pkgdir" "" "ucrt64"
-    _relocate_internal_dirs "$pkgdir" "ucrt64" \
-        "x86_64-w64-mingw32" "x86_64-w64-mingw32ucrt" "$pkgver" "$pkgver"
+    # C/C++ target libs from the upstream mingw-w64-ucrt-x86_64-gcc package in the
+    # sysroot. They land under ucrt64/, which the filesystem package's
+    # "x86_64-w64-mingw32ucrt -> ucrt64" symlink resolves the search path to.
+    copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-ucrt-x86_64-gcc" "$pkgdir"
+    # Triple fixup (ucrt64 only): our host gcc is configured
+    # --target=x86_64-w64-mingw32ucrt and searches lib/gcc/x86_64-w64-mingw32ucrt/,
+    # but upstream MSYS2 builds the ucrt gcc-internal bits under the PLAIN triple
+    # x86_64-w64-mingw32. Symlink the configured triple to the plain one so the
+    # driver finds libgcc/crt (minimal, in-place; no file relocation).
+    _ucrt_relink_triple "$pkgdir/ucrt64"
+}
+
+# ---- _ucrt_relink_triple — point the configured ucrt triple at the upstream one ----
+# Idempotent: only creates a symlink when the configured-triple dir is missing and
+# the plain-triple dir exists (no-op otherwise). Covers both gcc-internal layouts:
+#   lib/gcc/<triple>/<ver>/...  and  include/c++/<ver>/<triple>/...
+_ucrt_relink_triple() {
+    local base=$1 plain=x86_64-w64-mingw32 ours=x86_64-w64-mingw32ucrt
+    # lib/gcc/<triple>
+    if [ -d "$base/lib/gcc/$plain" ] && [ ! -e "$base/lib/gcc/$ours" ]; then
+        ln -sf "$plain" "$base/lib/gcc/$ours"
+    fi
+    # include/c++/<ver>/<triple>  (per-version config header dir)
+    local v
+    for v in "$base"/include/c++/*; do
+        [ -d "$v/$plain" ] && [ ! -e "$v/$ours" ] && ln -sf "$plain" "$v/$ours"
+    done
 }
 
 package_msys-cross-ucrt64-gcc-fortran() {
     pkgdesc="Cross GFortran for x86_64-w64-mingw32ucrt target"
     depends=(msys-cross-ucrt64-gcc mingw-w64-ucrt-x86_64-gcc-libs)
-    # Upstream ucrt64 gcc-fortran 16.1.0-1 stores its gcc-internal bits under the
-    # plain triple x86_64-w64-mingw32 — extract under it and relocate to our
-    # x86_64-w64-mingw32ucrt search path (version matches, only the triple drifts).
+    # libgfortran from the upstream mingw-w64-ucrt-x86_64-gcc-fortran package in the
+    # sysroot. The libgfortran .a/.mod live under ucrt64/lib (triple-independent),
+    # reached via the symlink; the configured-triple finclude dir is already linked
+    # by _ucrt_relink_triple in the -gcc package.
     _package_one_fortran "x86_64-w64-mingw32ucrt" \
-        "mingw-w64-ucrt-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst" "ucrt64" \
-        "x86_64-w64-mingw32" "$pkgver"
+        "mingw-w64-ucrt-x86_64-gcc-fortran" "ucrt64"
 }
