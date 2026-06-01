@@ -48,22 +48,37 @@ _pacman() {
 }
 
 echo "=== Installing mingw64 sysroot ==="
+# Also install the upstream gcc + gcc-fortran packages: msys-cross-gcc builds only
+# the host compiler (make all-gcc) and sources the TARGET runtime libs (libgcc,
+# libstdc++, libgfortran, crt, C++ headers) by copying them out of this sysroot
+# via `pacman -Ql` (see scripts/extract-target-libs.sh::copy_sysroot_pkg). Letting
+# pacman install them resolves the right version/triple/layout automatically.
 _pacman -Sy \
     mingw-w64-x86_64-headers mingw-w64-x86_64-crt \
     mingw-w64-x86_64-winpthreads mingw-w64-x86_64-gcc-libs \
-    mingw-w64-x86_64-zlib mingw-w64-x86_64-windows-default-manifest
+    mingw-w64-x86_64-zlib mingw-w64-x86_64-windows-default-manifest \
+    mingw-w64-x86_64-gcc mingw-w64-x86_64-gcc-fortran
 
 echo "=== Installing mingw32 sysroot ==="
+# NOTE: MSYS2 no longer ships mingw-w64-i686-gcc-fortran (32-bit mingw is being
+# retired upstream; the mingw32 repo has the i686 gcc but no gcc-fortran). pacman
+# aborts the WHOLE transaction on a single "target not found", and this script runs
+# under `set -e`, so we must NOT request the missing package — we install only
+# mingw-w64-i686-gcc here. The msys-cross-mingw32-gcc-fortran subpackage's
+# copy_sysroot_pkg call will then find nothing to copy (it just reports 0 files),
+# leaving the 32-bit Fortran subpackage effectively empty / host-driver-only.
 _pacman -Sy \
     mingw-w64-i686-headers mingw-w64-i686-crt \
     mingw-w64-i686-winpthreads mingw-w64-i686-gcc-libs \
-    mingw-w64-i686-zlib mingw-w64-i686-windows-default-manifest
+    mingw-w64-i686-zlib mingw-w64-i686-windows-default-manifest \
+    mingw-w64-i686-gcc
 
 echo "=== Installing ucrt64 sysroot ==="
 _pacman -Sy \
     mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt \
     mingw-w64-ucrt-x86_64-winpthreads mingw-w64-ucrt-x86_64-gcc-libs \
-    mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-windows-default-manifest
+    mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-windows-default-manifest \
+    mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran
 
 echo "=== Installing cygwin/msys sysroot ==="
 _pacman -Sy \

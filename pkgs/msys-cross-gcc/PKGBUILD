@@ -25,17 +25,43 @@ eval "$(declare -f _build | sed \
 _our_pkgrel=1
 pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 
+# Optional: build a subset of targets for fast iteration, e.g.
+#   _MSYS_CROSS_TARGETS=mingw64 makepkg ...
+# Default = all three. Values are sysroot subdirs: mingw64 mingw32 ucrt64.
+# This narrows the pkgname array, the per-target sysroot-symlink loop in build(),
+# and the inherited _targetpkgs (which drives _msys2_build's _build loop), so an
+# unset env reproduces the previous behaviour exactly (all 3 targets, 6 packages).
+_mc_targets="${_MSYS_CROSS_TARGETS:-mingw64 mingw32 ucrt64}"
+
+# subdir → our host target triple (passed to _build / _package_one).
+_mc_triple() {
+    case "$1" in
+        mingw64) echo x86_64-w64-mingw32 ;;
+        mingw32) echo i686-w64-mingw32 ;;
+        ucrt64)  echo x86_64-w64-mingw32ucrt ;;
+    esac
+}
+
 # Override the inherited upstream pkgbase (mingw-w64-cross-gcc) so the split
 # debug package is named msys-cross-gcc-debug, not mingw-w64-cross-gcc-debug.
 pkgbase=msys-cross-gcc
-pkgname=(
-    msys-cross-mingw64-gcc
-    msys-cross-mingw64-gcc-fortran
-    msys-cross-mingw32-gcc
-    msys-cross-mingw32-gcc-fortran
-    msys-cross-ucrt64-gcc
-    msys-cross-ucrt64-gcc-fortran
-)
+# Build the pkgname array from _mc_targets, preserving the canonical order
+# (mingw64, mingw32, ucrt64). Each selected subdir emits a -gcc + -gcc-fortran
+# package. Unset env → all 3 subdirs → the original 6 entries.
+pkgname=()
+for _sub in mingw64 mingw32 ucrt64; do
+    case " $_mc_targets " in *" $_sub "*) ;; *) continue ;; esac
+    pkgname+=("msys-cross-${_sub}-gcc" "msys-cross-${_sub}-gcc-fortran")
+done
+# Re-narrow the inherited upstream _targetpkgs so _msys2_build()'s build() loop
+# (for _pkg in "${_targetpkgs[@]}"; ... _build <triple>) compiles only the
+# selected targets. Upstream entries are "${_mingw_suff}-<subdir>-${_realname}"
+# (_mingw_suff/_realname are in scope after inherit_msys2).
+_targetpkgs=()
+for _sub in mingw64 mingw32 ucrt64; do
+    case " $_mc_targets " in *" $_sub "*) ;; *) continue ;; esac
+    _targetpkgs+=("${_mingw_suff}-${_sub}-${_realname}")
+done
 arch=('x86_64')
 # strip + debug => small main packages + a separate *-debug package carrying the
 # split debug symbols (the cross-gcc binaries are host Linux ELF, so objcopy
@@ -87,13 +113,11 @@ build() {
     _stage_prefix="${srcdir}/stage"
     mkdir -p "$_stage_prefix"
 
-    # Per-target sysroot symlinks (xgcc needs headers/CRT for target libs)
-    for _t in x86_64-w64-mingw32 i686-w64-mingw32 x86_64-w64-mingw32ucrt; do
-        case "$_t" in
-            x86_64-w64-mingw32ucrt) _sub=ucrt64 ;;
-            i686*)                  _sub=mingw32 ;;
-            x86_64*)                _sub=mingw64 ;;
-        esac
+    # Per-target sysroot symlinks (xgcc needs headers/CRT for target libs).
+    # Only the targets selected via _MSYS_CROSS_TARGETS (default all 3) — matches
+    # the narrowed _targetpkgs that _msys2_build's _build loop iterates.
+    for _sub in $_mc_targets; do
+        _t="$(_mc_triple "$_sub")"
         rm -rf "$_stage_prefix/$_t"
         ln -sf "$_bootstrap_prefix/$_sub" "$_stage_prefix/$_t"
     done
@@ -198,6 +222,36 @@ _package_one_fortran() {
     copy_sysroot_pkg "$_bootstrap_prefix" "$fpkg" "$pkgdir"
 }
 
+# ---- _place_internal_libs — put the gcc-internal version dir where the driver looks ----
+# copy_sysroot_pkg drops the upstream gcc package verbatim under the sysroot subdir,
+# so the gcc-internal version dir lands at <subdir>/lib/gcc/<triple>/<ver>/ (that is
+# where native MSYS2's in-sysroot driver finds it). OUR host driver lives in the
+# package-root bin/ — one level ABOVE <subdir>/ — so its FIRST library search dir is
+# the package-root lib/gcc/<triple>/<ver>/ (it never goes through the <triple> ->
+# <subdir> symlink to reach the internal libs). That dir only holds the headers/
+# plugin our DESTDIR install put there, so -lgcc/-lgcc_eh/crt*.o fail to link.
+# Merge the upstream internal-dir's LINK artifacts (libgcc*.a, libgcov.a, crt*.o,
+# finclude/, etc.) into the package-root version dir. Skip Windows host-target
+# binaries (cc1/lto1/... .exe and liblto_plugin.dll*) — our package supplies the
+# host backends under libexec/; those upstream PE blobs would just bloat the package.
+# Args: <src-triple> <subdir> [<dst-triple>]
+#   src-triple = the triple the upstream package used under <subdir>/lib/gcc/
+#   subdir     = sysroot subdir copy_sysroot_pkg wrote into (mingw64/mingw32/ucrt64)
+#   dst-triple = the triple OUR host driver searches (defaults to src-triple).
+#                ucrt64 differs: upstream uses the PLAIN triple x86_64-w64-mingw32,
+#                but our ucrt driver searches lib/gcc/x86_64-w64-mingw32ucrt/.
+_place_internal_libs() {
+    local target=$1 subdir=$2 dsttriple="${3:-$1}"
+    local src="$pkgdir/$subdir/lib/gcc/$target/$pkgver"
+    local dst="$pkgdir/lib/gcc/$dsttriple/$pkgver"
+    [ -d "$src" ] || { echo "WARNING: no upstream internal dir at $src" >&2; return 0; }
+    mkdir -p "$dst"
+    cp -a "$src/." "$dst/"
+    # The internal dir's only Windows binaries are *.exe backends and the LTO plugin
+    # DLL; drop them from the package-root copy (host backends come from libexec/).
+    find "$dst" \( -name '*.exe' -o -name 'liblto_plugin.dll' -o -name 'liblto_plugin.dll.a' \) -delete
+}
+
 package_msys-cross-mingw64-gcc() {
     pkgdesc="Cross GCC for x86_64-w64-mingw32 target (gcc/g++)"
     depends=(msys-cross-filesystem msys-cross-mingw64-binutils
@@ -210,6 +264,7 @@ package_msys-cross-mingw64-gcc() {
     # the MSYS2 sysroot subdir (mingw64), which the filesystem package's
     # "x86_64-w64-mingw32 -> mingw64" symlink resolves the cross-gcc search path to.
     copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-x86_64-gcc" "$pkgdir"
+    _place_internal_libs "x86_64-w64-mingw32" mingw64
 }
 
 package_msys-cross-mingw64-gcc-fortran() {
@@ -227,6 +282,7 @@ package_msys-cross-mingw32-gcc() {
     _package_one "i686-w64-mingw32"
     # C/C++ target libs from the upstream mingw-w64-i686-gcc package in the sysroot.
     copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-i686-gcc" "$pkgdir"
+    _place_internal_libs "i686-w64-mingw32" mingw32
 }
 
 package_msys-cross-mingw32-gcc-fortran() {
@@ -250,11 +306,16 @@ package_msys-cross-ucrt64-gcc() {
     # sysroot. They land under ucrt64/, which the filesystem package's
     # "x86_64-w64-mingw32ucrt -> ucrt64" symlink resolves the search path to.
     copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-ucrt-x86_64-gcc" "$pkgdir"
-    # Triple fixup (ucrt64 only): our host gcc is configured
+    # Put the gcc-internal link artifacts where our package-root driver searches.
+    # TODO(ucrt64 triple): upstream stores the ucrt internal dir under the PLAIN
+    # triple x86_64-w64-mingw32, but our host driver is configured
     # --target=x86_64-w64-mingw32ucrt and searches lib/gcc/x86_64-w64-mingw32ucrt/,
-    # but upstream MSYS2 builds the ucrt gcc-internal bits under the PLAIN triple
-    # x86_64-w64-mingw32. Symlink the configured triple to the plain one so the
-    # driver finds libgcc/crt (minimal, in-place; no file relocation).
+    # so we place the plain-triple source under our ucrt triple at the package root.
+    # Only mingw64 is verified in this change; ucrt64 reuses the mingw64-proven path
+    # plus this dst-triple remap — exercise it before relying on ucrt64 linking.
+    _place_internal_libs "x86_64-w64-mingw32" ucrt64 "x86_64-w64-mingw32ucrt"
+    # Triple fixup (ucrt64 only): also keep the in-subdir symlinks so the sysroot
+    # search path (ucrt64/lib/gcc/<ours> and include/c++/<ver>/<ours>) resolves.
     _ucrt_relink_triple "$pkgdir/ucrt64"
 }
 
