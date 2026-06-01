@@ -55,6 +55,16 @@ arch=('x86_64')
 # --only-keep-debug applies normally). Preserve the inherited upstream flags.
 options=('strip' 'debug' 'staticlibs' '!distcc' '!ccache' '!buildflags')
 
+# ---- check() — single target only ----
+# The inherited upstream check() loops over _targetpkgs (all 3 mingw targets) and
+# _check()s each by cd-ing into its binutils-build-<triple> dir. We build only ONE
+# target per run, so that loop would cd into a non-existent dir (e.g. ucrt64's) and
+# abort. Override it to run the binutils testsuite for just the target we built.
+# The inherited _check() helper (cd build dir; make -k check || true) is reused as-is.
+check() {
+    _check "$_mct_triple"
+}
+
 _bintools=(addr2line ar as c++filt dlltool dllwrap elfedit gprof ld ld.bfd
            nm objcopy objdump ranlib readelf size strings strip windmc windres)
 
