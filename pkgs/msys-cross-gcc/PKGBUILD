@@ -16,7 +16,8 @@ eval "$(declare -f _build | sed \
     -e '/export lt_cv_deplibs_check_method/d' \
     -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
     -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
-    -e 's|\bmake all\b|make -j"$(nproc)"|g')"
+    -e 's|--enable-version-specific-runtime-libs|--disable-version-specific-runtime-libs --with-pkgversion="msys2-cross ${pkgver}-${pkgrel}" --with-bugurl="https://github.com/xdqi/msys-cross/issues"|g' \
+    -e 's|\bmake all\b|make -j"$(nproc)" all-gcc|g')"
 
 # ---- Package metadata ----
 _our_pkgrel=1
@@ -47,6 +48,16 @@ for p in "${_chimera_patches[@]}"; do
     source+=("file://$_startdir/$p")
     sha256sums+=('SKIP')
 done
+
+# ---- Upstream MSYS2 target runtime libs (mingw64 only, PoC) ----
+# Instead of compiling libgcc/libstdc++/libgfortran/crt with the freshly-built
+# xgcc (make all-target...), we build only the host compiler (make all-gcc) and
+# bundle the version-matched runtime libs extracted from the upstream MSYS2
+# binary packages. PIN these external binaries (the rest of the project SKIPs).
+source+=("https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-gcc-16.1.0-5-any.pkg.tar.zst")
+sha256sums+=('10f7c55275f7fbe7924209d61c368a1a6fcf775cffbdeac2eef1f5ccacdd35cd')
+source+=("https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst")
+sha256sums+=('67b994f2fabcd63ec48bcb8028066c17364157597e29be0573903d9e64f08271')
 
 # ---- Override: make patching tolerant (GCC 15.2.0 may already have some files) ----
 apply_patch_with_msg() {
@@ -98,10 +109,35 @@ build() {
 _package_one() {
     local target=$1
     cd "${srcdir}/gcc-build-${target}"
-    make -j1 DESTDIR="${pkgdir}" install
+    # GCC 16's gcc/Makefile has no "install-gcc" or standalone "c++.install-common"
+    # target. "install-common" depends on lang.install-common (c/c++/fortran/lto
+    # install-common), so it installs the gcc/g++/gfortran drivers plus the
+    # backend compilers (cc1/cc1plus/f951) via its COMPILERS loop — exactly the
+    # host-only set we want, without touching the target runtime libraries.
+    make -C gcc -j1 DESTDIR="${pkgdir}" \
+        install-common install-driver install-cpp install-gcc-ar \
+        install-headers install-plugin install-lto-wrapper
 
+    # Resolve the staged install prefix the same way the move below does, so the
+    # backend-binary backstop lands in the SAME staged libexec the move drains
+    # (not at the package root) regardless of whether _stage_prefix is exported
+    # in this shell — keeps full builds and `makepkg -R` repackages consistent.
     local _pfx="${_stage_prefix:-${srcdir}/stage}"
     local _staged="${pkgdir}${_pfx}"
+    for b in cc1 cc1plus collect2 lto1 lto-wrapper; do
+        [ -f "gcc/$b" ] && install -Dm755 "gcc/$b" "${_staged}/libexec/gcc/${target}/${pkgver}/$b" || true
+    done
+    # The host LTO linker plugin (liblto_plugin.so) is built by "make all-gcc"
+    # under lto-plugin/.libs/, but "make -C gcc install-*" never installs it.
+    # The default specs pass -fuse-linker-plugin, so the driver refuses to run
+    # without it. Install it into the same versioned libexec dir gcc searches.
+    for _lto in lto-plugin/.libs/liblto_plugin.so gcc/liblto_plugin.so; do
+        if [ -f "$_lto" ]; then
+            install -Dm755 "$_lto" "${_staged}/libexec/gcc/${target}/${pkgver}/liblto_plugin.so"
+            break
+        fi
+    done
+
     if [ -d "$_staged" ]; then
         for _d in bin lib libexec share; do
             [ -e "$_staged/$_d" ] && mv "$_staged/$_d" "${pkgdir}/"
@@ -133,6 +169,17 @@ package_msys-cross-mingw64-gcc() {
              mingw-w64-x86_64-winpthreads mingw-w64-x86_64-gcc-libs
              mingw-w64-x86_64-zlib mingw-w64-x86_64-windows-default-manifest)
     _package_one "x86_64-w64-mingw32"
+    # _package_one moves bin/lib/libexec out of the stage prefix to the package
+    # root (the package installs at "/"), so the extracted target libs must also
+    # land at the package root — pass "" as the stage-prefix arg, not
+    # $_stage_prefix (which now points at the already-drained stage subtree).
+    # The runtime libs/headers go under the MSYS2 sysroot subdir (mingw64), which
+    # the filesystem package's "x86_64-w64-mingw32 -> mingw64" symlink resolves
+    # the cross-gcc search path to (avoids a real-dir vs symlink install clash).
+    bash "$_startdir/../../scripts/extract-target-libs.sh" \
+        "$srcdir/mingw-w64-x86_64-gcc-16.1.0-5-any.pkg.tar.zst" \
+        "x86_64-w64-mingw32" "$pkgver" "$pkgdir" "" "mingw64" \
+        "$srcdir/mingw-w64-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst"
 }
 
 package_msys-cross-mingw32-gcc() {
