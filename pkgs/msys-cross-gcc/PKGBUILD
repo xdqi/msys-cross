@@ -307,12 +307,12 @@ package_msys-cross-ucrt64-gcc() {
     # "x86_64-w64-mingw32ucrt -> ucrt64" symlink resolves the search path to.
     copy_sysroot_pkg "$_bootstrap_prefix" "mingw-w64-ucrt-x86_64-gcc" "$pkgdir"
     # Put the gcc-internal link artifacts where our package-root driver searches.
-    # TODO(ucrt64 triple): upstream stores the ucrt internal dir under the PLAIN
-    # triple x86_64-w64-mingw32, but our host driver is configured
+    # ucrt64 triple remap (verified): upstream stores the ucrt internal dir under
+    # the PLAIN triple x86_64-w64-mingw32, but our host driver is configured
     # --target=x86_64-w64-mingw32ucrt and searches lib/gcc/x86_64-w64-mingw32ucrt/,
     # so we place the plain-triple source under our ucrt triple at the package root.
-    # Only mingw64 is verified in this change; ucrt64 reuses the mingw64-proven path
-    # plus this dst-triple remap — exercise it before relying on ucrt64 linking.
+    # Confirmed end-to-end: -print-file-name=libgcc.a/crtbegin.o/libgcc_eh.a resolve
+    # to the package-root ucrt dir, and C/static-C++/Fortran compile+link+run (wine).
     _place_internal_libs "x86_64-w64-mingw32" ucrt64 "x86_64-w64-mingw32ucrt"
     # Triple fixup (ucrt64 only): also keep the in-subdir symlinks so the sysroot
     # search path (ucrt64/lib/gcc/<ours> and include/c++/<ver>/<ours>) resolves.
