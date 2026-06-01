@@ -75,9 +75,10 @@ inherit_aur() {
     local _aur_dir="$_aur_root/$1"
     local _aur_pkgbuild="$_aur_dir/PKGBUILD"
 
-    # Source the raw AUR PKGBUILD. Its top-level body sets CC=musl-gcc and
-    # LDFLAGS=-static; the caller re-exports CC/LDFLAGS AFTER this returns, so the
-    # caller's values win (build() reads ${CC}/${LDFLAGS} at call time).
+    # Source the raw AUR PKGBUILD. Sourcing runs its top-level body immediately
+    # (which sets CC=musl-gcc and LDFLAGS=-static); callers MUST re-set CC/LDFLAGS
+    # after the inherit_aur call to override them (build() reads ${CC}/${LDFLAGS}
+    # at call time, so the later values win).
     source "$_aur_pkgbuild"
 
     # Drop Arch makedepends/pgp checks we don't honor in this repo.
@@ -95,10 +96,22 @@ inherit_aur() {
         esac
     done
 
-    # Save the AUR functions for chaining/overriding.
-    eval "$(declare -f prepare 2>/dev/null | sed 's/^prepare /_aur_prepare /' || echo '_aur_prepare() { true; }')"
-    eval "$(declare -f build   2>/dev/null | sed 's/^build /_aur_build /'     || echo '_aur_build() { true; }')"
-    eval "$(declare -f package 2>/dev/null | sed 's/^package /_aur_package /' || echo '_aur_package() { true; }')"
+    # Save the AUR functions for chaining/overriding (true-body fallback if absent).
+    if declare -f prepare >/dev/null 2>&1; then
+        eval "$(declare -f prepare | sed 's/^prepare /_aur_prepare /')"
+    else
+        _aur_prepare() { true; }
+    fi
+    if declare -f build >/dev/null 2>&1; then
+        eval "$(declare -f build | sed 's/^build /_aur_build /')"
+    else
+        _aur_build() { true; }
+    fi
+    if declare -f package >/dev/null 2>&1; then
+        eval "$(declare -f package | sed 's/^package /_aur_package /')"
+    else
+        _aur_package() { true; }
+    fi
 }
 
 # Warning noise from building GCC's tree with zig cc (clang) is handled in the
