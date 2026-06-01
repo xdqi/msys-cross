@@ -1,4 +1,7 @@
 #!/bin/bash
 # zig cc wrapper — thin shim over the shared zig-driver (sccache routing + warning
 # /flag filtering). See scripts/zig-driver.sh for the actual logic.
-exec bash "$(dirname "$(readlink -f "$0")")/zig-driver.sh" cc "$@"
+# The zig subcommand is passed via _ZIG_SUB (NOT a positional arg): sccache probes
+# and re-runs the wrapper with compiler flags in $1.. (e.g. `<wrapper> -E -`), so the
+# wrapper must treat every positional as a compiler arg, never as a subcommand.
+exec env _ZIG_SUB=cc bash "$(dirname "$(readlink -f "$0")")/zig-driver.sh" "$@"

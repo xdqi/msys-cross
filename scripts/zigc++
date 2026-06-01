@@ -1,4 +1,6 @@
 #!/bin/bash
 # zig c++ wrapper — thin shim over the shared zig-driver (sccache routing + warning
 # /flag filtering, adds -x c++ for compile units). See scripts/zig-driver.sh.
-exec bash "$(dirname "$(readlink -f "$0")")/zig-driver.sh" c++ "$@"
+# Subcommand passed via _ZIG_SUB (NOT positional) — see the zigcc note: sccache
+# re-runs the wrapper with bare compiler flags in $1.., so no positional subcommand.
+exec env _ZIG_SUB=c++ bash "$(dirname "$(readlink -f "$0")")/zig-driver.sh" "$@"
