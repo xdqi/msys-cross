@@ -5,6 +5,7 @@
 # sub-driver. See zig-common.sh for the sccache two-role trick and why.
 source "$(dirname "$(readlink -f "$0")")/zig-common.sh"
 
+zig_handle_dumpmachine "$@"    # gcc-compatible -dumpmachine (exits 0); see zig-common.sh
 zig_sccache_reexec "$@"        # outer role re-execs under sccache; inner falls through
 zig_filter_args "$@"           # ZIG_ARGS (filtered), ZIG_IS_COMPILE — see zig-common.sh
 exec zig cc -target "$ZIG_CC_TARGET" "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"

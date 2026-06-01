@@ -40,6 +40,26 @@ zig_sccache_reexec() {
     unset _ZIGCC_INNER 2>/dev/null || true
 }
 
+# zig_handle_dumpmachine "$@"
+# GNU gcc's `-dumpmachine` prints the bare target triple and exits 0; build systems
+# (meson — meson.build:273 detect_machine_info) run it to learn the target. Our
+# wrappers drive `zig cc -target x86_64-linux-gnu.2.11`, and `zig cc -dumpmachine`
+# echoes that target as `x86_64-unknown-linux-gnu.2.11` on stdout but THEN re-parses
+# its own target string, rejects the glibc-version field with
+#   zig: error: version '.2.11' in target triple '…' is invalid
+# and exits 1 — so meson aborts. A normal GNU machine triple carries no glibc-version
+# suffix, so emulate gcc: if -dumpmachine is requested, print the clean triple and
+# exit 0 before handing off to zig. Call FIRST in the wrapper (it may exit).
+zig_handle_dumpmachine() {
+    local a
+    for a in "$@"; do
+        if [ "$a" = "-dumpmachine" ]; then
+            echo "x86_64-unknown-linux-gnu"
+            exit 0
+        fi
+    done
+}
+
 # -Wno-* for clang diagnostics that are ON BY DEFAULT (survive the -Wall drop) and
 # only add noise when building GCC's tree. Appended LAST by the wrappers so they win.
 ZIG_WNO=(

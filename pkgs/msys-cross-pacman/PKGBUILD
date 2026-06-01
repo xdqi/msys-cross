@@ -20,7 +20,11 @@ backup=('etc/pacman.d/pacman.conf')
 # makedepends; the build driver runs makepkg -d so they must be on the host —
 # see scripts/build.sh). musl/kernel-headers-musl are NOT needed (zig supplies glibc).
 makedepends=('meson' 'cmake' 'gperf' 'git')
-options=('!emptydirs' '!lto' '!strip')   # keep AUR !emptydirs/!lto; static binary, don't strip-split
+# keep AUR !emptydirs/!lto; static binary, don't strip-split. !debug: with !strip the
+# binary keeps its debug_info, and without !debug makepkg's default `debug` option
+# copies the entire compiled source tree (~2200 files / 80 MB of brotli/openssl/curl/…
+# .c) into usr/src/debug — pure bloat for a bootstrap pkg whose payload is 3 files.
+options=('!emptydirs' '!lto' '!strip' '!debug')
 
 # ---- Our additions to source[]: 3 pacman source patches + wrapper/conf ----
 source+=("file://$_startdir/0001-nonroot-allow-install.patch"
@@ -35,8 +39,17 @@ sha512sums+=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 # LDFLAGS=-static. build() reads ${CC}/${LDFLAGS} at call time, so these win.
 setup_zig_env
 # setup_zig_env's LDFLAGS pulls in gmp/mpfr/... which pacman's deps don't need;
-# reset to a clean mostly-static default (the AUR build adds its own per-dep -L/-l).
-export LDFLAGS="-Wl,-Bdynamic"
+# reset to a clean default (the AUR build adds its own per-dep -L/-l).
+#
+# Do NOT force -Wl,-Bdynamic here: pacman's deps (liblzma, libbz2, libz, ...) are
+# built static-only (.a, no .so), and a configure-time link test such as
+# libarchive's `sizeof(wchar_t)` links a probe with -llzma. zig's linker honours
+# -Bdynamic with a no-fallback strategy: it searches ONLY for liblzma.so and aborts
+# ("unable to find dynamic system library 'lzma'") instead of falling back to the
+# static archive the way GNU ld would. An empty LDFLAGS lets zig resolve each -l<dep>
+# to its static .a while still linking the system libc/libm DYNAMICALLY by default
+# for the gnu target — i.e. exactly the intended mostly-static (glibc-dynamic) binary.
+export LDFLAGS=""
 # Make CC a single token usable in the AUR build()'s `sed s|CC=gcc|CC=${CC}|`.
 export CC CXX AR RANLIB
 
@@ -52,6 +65,20 @@ prepare() {
 
 # ---- build(): inherited AUR build, with our CC/LDFLAGS already exported ----
 build() {
+    # libarchive's AUR build line REPLACES the env CFLAGS with a bare
+    #   CFLAGS="-L${srcdir}/temp/usr/lib"
+    # (it assumes the host toolchain already defaults to an optimised, no-sanitizer
+    # build). Under zig cc that assumption is wrong on both counts: dropping our
+    # -O2 leaves clang at -O0, AND zig cc — unlike GNU gcc — turns on -fsanitize=
+    # undefined by DEFAULT, so at -O0 every UB-check site emits an external
+    # __ubsan_handle_* reference. libarchive.a then carries 600+ such undefined
+    # symbols and the final pacman link fails ("ld.lld: undefined symbol:
+    # __ubsan_handle_builtin_unreachable", ...) because we link only the static .a
+    # archives, not zig's compiler_rt/ubsan runtime. gcc never emits these; restore
+    # gcc parity for just libarchive by re-adding -O2 and -fno-sanitize=undefined to
+    # its CFLAGS override (other deps keep our exported CFLAGS and are unaffected).
+    eval "$(declare -f _aur_build | sed \
+        's|CFLAGS="-L${srcdir}/temp/usr/lib"|CFLAGS="-L${srcdir}/temp/usr/lib -O2 -fno-sanitize=undefined"|')"
     _aur_build
 }
 
@@ -81,9 +108,14 @@ EOF
     fi
     echo "check(): OK — non-root gate removed"
 
-    # No-chown: the source must no longer request ARCHIVE_EXTRACT_OWNER.
-    if grep -q 'ARCHIVE_EXTRACT_OWNER' "${srcdir}/pacman/lib/libalpm/add.c"; then
-        echo "check(): FAILED — ARCHIVE_EXTRACT_OWNER still present in add.c" >&2; return 1
+    # No-chown: the source must no longer OR ARCHIVE_EXTRACT_OWNER into the libarchive
+    # extract bitmask. Match only the OPERATIVE form (the flag adjacent to a '|' in the
+    # archive_flags expression), not the bare word — 0002-no-extract-owner.patch leaves
+    # an explanatory comment that mentions "ARCHIVE_EXTRACT_OWNER" in prose, and a bare
+    # `grep -q ARCHIVE_EXTRACT_OWNER` would false-positive on that comment.
+    if grep -qE '(ARCHIVE_EXTRACT_OWNER[[:space:]]*\||\|[[:space:]]*ARCHIVE_EXTRACT_OWNER)' \
+            "${srcdir}/pacman/lib/libalpm/add.c"; then
+        echo "check(): FAILED — ARCHIVE_EXTRACT_OWNER still OR'd into archive_flags in add.c" >&2; return 1
     fi
     echo "check(): OK — extract-owner flag removed"
 

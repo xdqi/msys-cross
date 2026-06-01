@@ -97,8 +97,21 @@ inherit_aur() {
     done
 
     # Save the AUR functions for chaining/overriding (true-body fallback if absent).
+    # The pacman-static prepare() finds its pacman-specific patches with
+    #   grep 'pacman-.*.patch'   over ${source[@]}
+    # which assumes the only entries containing the substring 'pacman-...patch' are
+    # the genuine pacman patches (named pacman-revertme-*.patch / pacman-reproducible-
+    # *.patch, fetched as <basename>::<url>). But inherit_aur above rewrote every LOCAL
+    # patch to file://<_aur_dir>/<name>, and _aur_dir ends in "pacman-static" — so the
+    # unanchored substring now also matches EVERY local patch path (curl-8.19.0-brotli-
+    # static.patch, ca-dir.patch, openssl-*.patch, our own 000X-*.patch), which prepare()
+    # then tries to `patch -Np1` onto the pacman tree and aborts. Anchor 'pacman-' to a
+    # basename boundary (start-of-string or right after a '/') so the directory component
+    # "pacman-static/" no longer matches, while the bare-basename remote patches still do.
     if declare -f prepare >/dev/null 2>&1; then
-        eval "$(declare -f prepare | sed 's/^prepare /_aur_prepare /')"
+        eval "$(declare -f prepare \
+            | sed "s|grep 'pacman-\.\*\.patch'|grep -E '(^\|/)pacman-[^/]*\\\\.patch'|" \
+            | sed 's/^prepare /_aur_prepare /')"
     else
         _aur_prepare() { true; }
     fi
