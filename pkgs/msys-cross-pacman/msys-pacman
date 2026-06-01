@@ -1,11 +1,12 @@
 #!/bin/sh
 # msys-pacman — relocatable pacman-static wrapper for msys2-cross toolchain.
-# pacman-static is binary-patched (see patch-pacman-nonroot.sh) to:
+# pacman-static is built from source with three source patches (see the PKGBUILD's
+# 0001/0002/0003-*.patch) to:
 #   (a) drop the hard root requirement,
 #   (b) clear ARCHIVE_EXTRACT_OWNER so extraction never chowns files, and
-#   (c) redirect the system alpm hook dir to an empty path, so no MSYS2/Windows
-#       package hook (rebase, install-info.exe, ...) is ever Exec'd on the Linux
-#       bootstrap host.
+#   (c) redirect the system alpm hook dir to libalpm/msys-cross-hooks/ — a dir that
+#       MSYS2/Windows packages never populate — so no package hook (rebase,
+#       install-info.exe, ...) is ever Exec'd on the Linux bootstrap host.
 # It therefore runs identically whether root or not — no fakeroot needed.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -17,7 +18,7 @@ export CURL_CA_BUNDLE="$PREFIX/etc/ssl/certs/ca-certificates.crt"
 # keep every pacman-writable location inside the user-owned prefix.
 # --hookdir is the admin hook dir (absolute, not root-rebased): a designated,
 # in-prefix home for any future Linux-side msys-cross hooks. The system hook dir
-# is neutralized by the binary patch above, so this is the only dir hooks run from.
+# is redirected away by source patch 0003, so this is the only dir hooks run from.
 mkdir -p "$PREFIX/var/cache/pacman/pkg" \
          "$PREFIX/etc/pacman.d/gnupg" \
          "$PREFIX/etc/pacman.d/hooks"
