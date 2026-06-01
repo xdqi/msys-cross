@@ -61,19 +61,39 @@ Concrete values: `--with-pkgversion="msys2-cross ${pkgver}-${pkgrel}"` and
 `--with-bugurl="https://github.com/xdqi/msys-cross/issues"`. These surface in
 `gcc --version` so a user can tell it's the msys2-cross build.
 
-### 2. install changes (in `_package_one`)
+**Thread model (decided during PoC):** also flip `--enable-threads=win32` →
+`--enable-threads=posix`. The bundled upstream libstdc++ is posix-threads; our
+compiler must match or static C++ fails to link (`pthread_mutex_*`). Threads is
+the only ABI-relevant divergence from the native gcc that built the bundled libs
+(exception model, string ABI, etc. already match). The sed targets the literal
+`--enable-threads=${_threads}` (declare -f does not expand `${_threads}`).
 
-Replace `make … install` with the host-only granular targets (modeled on native
-`mingw-w64-gcc`):
+### 2. install changes — split into `-gcc` (C/C++) and `-gcc-fortran`
 
-```
-make -C gcc DESTDIR=… install-driver install-cpp install-gcc \
-  install-headers install-lto-wrapper c++.install-common install-plugin
-make -C c++tools DESTDIR=… install        # if present
-# install cc1/cc1plus/collect2/gcov/gcov-tool explicitly (as native does)
-```
+Replace `make … install` with host-only granular targets (modeled on native
+`mingw-w64-gcc`), and **split fortran into its own subpackage** (upstream splits
+`gcc` / `gcc-fortran` / `gcc-libgfortran` for the same reason — Fortran is a large,
+rarely-used add-on). Our packages mirror the gcc / gcc-fortran boundary (no
+separate libgfortran-runtime package; the runtime DLL stays a sysroot concern).
 
-No `make -C <target>/lib*… install` — target libs are not built or installed.
+- **`msys-cross-<sub>-gcc`** (C/C++): `_package_one` installs only the C/C++
+  host bits + repackages the C/C++ target libs. Use the **C/C++-only** install
+  targets — NOT the broad `install-common` (which pulls fortran too):
+  `make -C gcc … c++.install-common install-driver install-cpp install-gcc-ar
+  install-headers install-plugin install-lto-wrapper`, plus explicit backend
+  binaries `cc1 cc1plus collect2 lto1 lto-wrapper` and `liblto_plugin.so`.
+- **`msys-cross-<sub>-gcc-fortran`** (new): `_package_one_fortran` installs the
+  fortran driver + backend + libgfortran: `make -C gcc … fortran.install-common`,
+  the `f951` backend binary, and the libgfortran bits extracted from the upstream
+  `mingw-w64-<arch>-gcc-fortran` package. `depends` on the matching `-gcc`
+  package (so installing fortran pulls the C/C++ compiler).
+
+This both fixes a PoC-discovered bug (the broad `install-common` did not actually
+deliver `f951`/the gfortran driver — Fortran was incomplete) and lets users who
+don't need Fortran install the smaller `-gcc` package alone.
+
+No `make -C <target>/lib*… install` — target libs are not built; they are
+repackaged from upstream (next section).
 
 ### 3. target gcc-internal libs are repackaged at build time (no upstream-gcc dep for users)
 
@@ -85,15 +105,20 @@ searches). The user installs only our package (+ the normal sysroot packages).
 
 Split of responsibility:
 
-- **Repackaged into our gcc package** (gcc-internal, version-locked — what we
-  stopped building): `libgcc.a`, `libgcc_eh.a`, `libgcov.a`, `crtbegin.o`,
-  `crtend.o`, `crtfastmath.o`, `libstdc++.a`/`.dll.a`, `libsupc++.a`,
-  `libstdc++exp.a`/`fs.a`, the C++ headers (`include/c++/<ver>/`), `libgfortran.a`,
-  `libgomp.a`, `libquadmath.a`, `libatomic.a`, plus the matching runtime DLLs
-  (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libgfortran-5.dll`, …) — i.e. the
-  exact set the current self-built package ships under `lib/gcc/<target>/<ver>/`.
-  Extract from: `mingw-w64-<arch>-gcc` + `mingw-w64-<arch>-gcc-fortran` (mingw
-  repo, 16.1.0); cygwin from the msys repo `gcc` 15.2.0.
+- **Repackaged into our `-gcc` package** (C/C++ gcc-internal, version-locked):
+  `libgcc.a`, `libgcc_eh.a`, `libgcov.a`, `crtbegin.o`, `crtend.o`,
+  `crtfastmath.o`, `libstdc++.a`/`.dll.a`, `libsupc++.a`, `libstdc++exp.a`/`fs.a`,
+  the C++ headers (`include/c++/<ver>/`), `libgomp.a`, `libquadmath.a`,
+  `libatomic.a`. Extract from `mingw-w64-<arch>-gcc` (mingw repo, 16.1.0); cygwin
+  from the msys repo `gcc` 15.2.0.
+- **Repackaged into our `-gcc-fortran` package**: `libgfortran.a`/`.dll.a`/`.spec`
+  extracted from `mingw-w64-<arch>-gcc-fortran` (16.1.0). (cygwin has no Fortran
+  → no cygwin-gcc-fortran package.)
+- NOTE: the runtime DLLs (`libstdc++-6.dll`, `libgcc_s_seh-1.dll`,
+  `libgfortran-5.dll`) are NOT repackaged — they live in the upstream `gcc-libs`
+  package and reach the target as a sysroot dep (see below). The extraction
+  helper must select only link-time `.a`/headers/`.o`/`.spec`, not sweep DLLs
+  (in particular not the host `liblto_plugin.dll`).
 - **Kept as `depends` (genuine target sysroot, unchanged)**:
   `mingw-w64-<arch>-{headers,crt,winpthreads,gcc-libs,zlib,windows-default-manifest}`.
   `gcc-libs` here is the target system's runtime DLLs that the built `.exe`
