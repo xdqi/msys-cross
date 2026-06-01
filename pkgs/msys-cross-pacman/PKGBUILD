@@ -16,6 +16,10 @@ pkgrel="${pkgrel}.${_our_pkgrel}"   # AUR pkgrel . ours
 arch=('x86_64')
 depends=('msys-cross-filesystem' 'msys-cross-ca-certificates')
 backup=('etc/pacman.d/pacman.conf')
+# The from-source build needs these host tools (inherit_aur zeroed the AUR's
+# makedepends; the build driver runs makepkg -d so they must be on the host —
+# see scripts/build.sh). musl/kernel-headers-musl are NOT needed (zig supplies glibc).
+makedepends=('meson' 'cmake' 'gperf' 'git')
 options=('!emptydirs' '!lto' '!strip')   # keep AUR !emptydirs/!lto; static binary, don't strip-split
 
 # ---- Our additions to source[]: 3 pacman source patches + wrapper/conf ----
