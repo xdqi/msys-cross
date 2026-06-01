@@ -1,6 +1,7 @@
 # Maintainer: msys2-cross project
 _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_startdir/../../scripts/msys-cross-common.sh"
+source "$_startdir/../../scripts/extract-target-libs.sh"
 inherit_msys2 "mingw-w64-cross-gcc"
 
 # ---- Fix _build() to match build_gcc.sh configure line-for-line ----
@@ -196,8 +197,7 @@ _package_one_fortran() {
     rm -rf "${pkgdir}/share"
     find "${pkgdir}" -name "*.exe" -delete
     # libgfortran.a/.dll.a/.spec + finclude/.mod + libcaf_*.a from upstream -gcc-fortran
-    bash "$_startdir/../../scripts/extract-target-libs.sh" \
-        "$srcdir/$fpkg" "$target" "$pkgver" "$pkgdir" "" mingw64
+    extract_target_libs "$srcdir/$fpkg" "$target" "$pkgver" "$pkgdir" "" mingw64
 }
 
 package_msys-cross-mingw64-gcc() {
@@ -215,7 +215,7 @@ package_msys-cross-mingw64-gcc() {
     # the filesystem package's "x86_64-w64-mingw32 -> mingw64" symlink resolves
     # the cross-gcc search path to (avoids a real-dir vs symlink install clash).
     # C/C++ libs only — libgfortran moves to the -gcc-fortran subpackage.
-    bash "$_startdir/../../scripts/extract-target-libs.sh" \
+    extract_target_libs \
         "$srcdir/mingw-w64-x86_64-gcc-16.1.0-5-any.pkg.tar.zst" \
         "x86_64-w64-mingw32" "$pkgver" "$pkgdir" "" "mingw64"
 }
