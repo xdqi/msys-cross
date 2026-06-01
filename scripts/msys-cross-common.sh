@@ -65,13 +65,9 @@ inherit_msys2() {
     eval "$(declare -f build 2>/dev/null | sed 's/^build /_msys2_build /' || echo '_msys2_build() { true; }')"
 }
 
-# zig cc is clang under the hood, so building GCC's own source tree triggers tens
-# of thousands of clang-only diagnostics that don't apply to GCC's code (it's
-# written for GCC). Silence the noisy ones — they are style/portability nits, not
-# real problems, and -Wno-error already keeps them non-fatal. -Wno-unknown-warning-option
-# goes first: it suppresses both GCC's own -Wno-<gcc-only> flags that clang can't
-# parse AND makes any -Wno-* below that this clang version doesn't recognize a no-op.
-_ZIG_QUIET_FLAGS="-Wno-unknown-warning-option -Wno-mismatched-tags -Wno-nontrivial-memcall -Wno-ignored-attributes -Wno-bitwise-instead-of-logical -Wno-constant-logical-operand -Wno-tautological-compare -Wno-parentheses-equality -Wno-nested-anon-types -Wno-gnu-zero-variadic-macro-arguments -Wno-shift-count-overflow"
+# Warning noise from building GCC's tree with zig cc (clang) is handled in the
+# zigcc/zigc++ wrappers, which strip GCC's bare -Wall/-Wextra/-W/-Werror switches
+# (clang-only diagnostics that don't apply to GCC's code). Nothing to do here.
 
 setup_zig_env() {
     export PATH="$_install_prefix/bin:$_zig_path:$_zig_path-x86_64-linux-0.16.0:$PATH"
@@ -79,7 +75,7 @@ setup_zig_env() {
     export CXX="$_wrappers/zigc++"
     export AR="zig ar"
     export RANLIB="zig ranlib"
-    export CFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error $_ZIG_QUIET_FLAGS"
-    export CXXFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error $_ZIG_QUIET_FLAGS"
+    export CFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
+    export CXXFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
     export LDFLAGS="-L$_deps/lib -Wl,-Bstatic -lgmp -lmpfr -lmpc -lisl -lz -lzstd -Wl,-Bdynamic"
 }

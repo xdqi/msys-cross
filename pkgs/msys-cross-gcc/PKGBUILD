@@ -15,8 +15,8 @@ eval "$(declare -f _build | sed \
     -e 's|--enable-libgomp|--disable-libcc1 --enable-libgomp|g' \
     -e 's| fortran|,fortran|g' \
     -e '/export lt_cv_deplibs_check_method/d' \
-    -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error '"$_ZIG_QUIET_FLAGS"'"|g' \
-    -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error '"$_ZIG_QUIET_FLAGS"'"|g' \
+    -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
+    -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
     -e 's|--enable-version-specific-runtime-libs|--disable-version-specific-runtime-libs --with-pkgversion="msys2-cross ${pkgver}-${pkgrel}" --with-bugurl="https://github.com/xdqi/msys-cross/issues"|g' \
     -e 's|--enable-threads=\${_threads}|--enable-threads=posix|g' \
     -e 's|\bmake all\b|make -j"$(nproc)" all-gcc|g')"
@@ -162,16 +162,18 @@ _package_one() {
 # we deliberately don't run here); libgfortran.a/.dll.a/.spec + finclude .mod
 # files come from the upstream mingw-w64-<arch>-gcc-fortran package that
 # prepare-build-sysroot.sh installed into the build sysroot.
-# Args: <our-target-triple> <upstream-pkgname> <sysroot-subdir>
-#   * <our-target-triple>  — the triple our host gcc was configured with
-#     (x86_64-w64-mingw32 / i686-w64-mingw32 / x86_64-w64-mingw32ucrt); names the
-#     build dir and the host f951 dest.
-#   * <upstream-pkgname>   — mingw-w64-<arch>-gcc-fortran (whatever pacman resolved
-#     in the sysroot; copy_sysroot_pkg copies its files verbatim).
-#   * <sysroot-subdir>     — mingw64/mingw32/ucrt64 (the installed filesystem
-#     symlink target the cross-gcc search path resolves <target> to).
+# Arg: <our-target-triple> — the triple our host gcc was configured with
+#   (x86_64-w64-mingw32 / i686-w64-mingw32 / x86_64-w64-mingw32ucrt); names the
+#   build dir and the host f951 dest, and maps to the upstream gcc-fortran package
+#   name copied out of the sysroot (copy_sysroot_pkg copies its files verbatim, so
+#   pacman's resolved version/triple/layout is used as-is).
 _package_one_fortran() {
-    local target=$1 fpkg=$2 subdir=$3
+    local target=$1 fpkg
+    case "$target" in
+        x86_64-w64-mingw32)     fpkg=mingw-w64-x86_64-gcc-fortran ;;
+        i686-w64-mingw32)       fpkg=mingw-w64-i686-gcc-fortran ;;
+        x86_64-w64-mingw32ucrt) fpkg=mingw-w64-ucrt-x86_64-gcc-fortran ;;
+    esac
     cd "${srcdir}/gcc-build-${target}"
     make -C gcc -j1 DESTDIR="${pkgdir}" fortran.install-common
     local _pfx="${_stage_prefix:-${srcdir}/stage}"
@@ -213,7 +215,7 @@ package_msys-cross-mingw64-gcc() {
 package_msys-cross-mingw64-gcc-fortran() {
     pkgdesc="Cross GFortran for x86_64-w64-mingw32 target"
     depends=(msys-cross-mingw64-gcc mingw-w64-x86_64-gcc-libs)
-    _package_one_fortran "x86_64-w64-mingw32" "mingw-w64-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst" "mingw64"
+    _package_one_fortran "x86_64-w64-mingw32"
 }
 
 package_msys-cross-mingw32-gcc() {
@@ -234,8 +236,7 @@ package_msys-cross-mingw32-gcc-fortran() {
     # sysroot. pacman may have resolved an older version (e.g. 15.2.0) for i686;
     # we copy whatever it installed verbatim — the .mod module format and
     # libgfortran SONAME are stable across recent GCC majors.
-    _package_one_fortran "i686-w64-mingw32" \
-        "mingw-w64-i686-gcc-fortran" "mingw32"
+    _package_one_fortran "i686-w64-mingw32"
 }
 
 package_msys-cross-ucrt64-gcc() {
@@ -281,6 +282,5 @@ package_msys-cross-ucrt64-gcc-fortran() {
     # sysroot. The libgfortran .a/.mod live under ucrt64/lib (triple-independent),
     # reached via the symlink; the configured-triple finclude dir is already linked
     # by _ucrt_relink_triple in the -gcc package.
-    _package_one_fortran "x86_64-w64-mingw32ucrt" \
-        "mingw-w64-ucrt-x86_64-gcc-fortran" "ucrt64"
+    _package_one_fortran "x86_64-w64-mingw32ucrt"
 }

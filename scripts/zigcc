@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # zig cc wrapper, optionally routed through sccache.
 #
 # sccache can't wrap `zig cc` directly (it's a two-segment command; sccache
@@ -22,4 +22,17 @@ if [ -z "${_ZIGCC_INNER:-}" ]; then
     fi
 fi
 unset _ZIGCC_INNER 2>/dev/null || true
-exec zig cc -target x86_64-linux-gnu.2.11 "$@"
+
+# Drop GCC's developer warning switches before handing off to zig cc (clang).
+# Building GCC's own tree with -Wall/-Wextra/-Werror produces tens of thousands
+# of clang-only diagnostics that don't apply to GCC's code. Strip ONLY the bare
+# switches; functional forms like -Werror=narrowing and -Wno-error=narrowing are
+# matched exactly and preserved (they control GCC's intended behaviour, not noise).
+args=()
+for a in "$@"; do
+    case "$a" in
+        -Wall|-Wextra|-W|-Werror) continue ;;
+    esac
+    args+=("$a")
+done
+exec zig cc -target x86_64-linux-gnu.2.11 "${args[@]}"

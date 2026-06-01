@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # zig c++ wrapper, optionally routed through sccache. See zigcc for the
 # two-role (_ZIGCC_INNER) sccache trick; the only difference here is that
 # compile invocations (-c/-E/-S) need an explicit `-x c++`.
@@ -10,10 +10,21 @@ if [ -z "${_ZIGCC_INNER:-}" ]; then
     fi
 fi
 unset _ZIGCC_INNER 2>/dev/null || true
+
+# Detect compile (needs -x c++), then drop GCC's bare developer warning switches
+# (-Wall/-Wextra/-W/-Werror) — clang-only diagnostics that don't apply to GCC's
+# code. Functional -Werror=*/-Wno-* forms are preserved (exact match only).
 is_compile=false
-for a in "$@"; do case "$a" in -c|-E|-S) is_compile=true; break ;; esac; done
+args=()
+for a in "$@"; do
+    case "$a" in
+        -c|-E|-S) is_compile=true ;;
+        -Wall|-Wextra|-W|-Werror) continue ;;
+    esac
+    args+=("$a")
+done
 if $is_compile; then
-    exec zig c++ -x c++ -target x86_64-linux-gnu.2.11 "$@"
+    exec zig c++ -x c++ -target x86_64-linux-gnu.2.11 "${args[@]}"
 else
-    exec zig c++ -target x86_64-linux-gnu.2.11 "$@"
+    exec zig c++ -target x86_64-linux-gnu.2.11 "${args[@]}"
 fi
