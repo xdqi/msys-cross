@@ -1,6 +1,14 @@
 #!/bin/bash
-# zig c++ wrapper — thin shim over the shared zig-driver (sccache routing + warning
-# /flag filtering, adds -x c++ for compile units). See scripts/zig-driver.sh.
-# Subcommand passed via _ZIG_SUB (NOT positional) — see the zigcc note: sccache
-# re-runs the wrapper with bare compiler flags in $1.., so no positional subcommand.
-exec env _ZIG_SUB=c++ bash "$(dirname "$(readlink -f "$0")")/zig-driver.sh" "$@"
+# zig c++ wrapper, optionally routed through sccache. Shares zig-common.sh with
+# zigcc (sourced, not exec'd — $0 stays this script for sccache's probe). The only
+# difference vs zigcc: compile invocations (-c/-E/-S) need an explicit `-x c++` so a
+# .c source (libgcc/libgcov-util.c etc.) is compiled as C++; without it libc++'s C++
+# frontend isn't engaged and <type_traits> errors out ("is_trivially_destructible
+# not implemented", "integer pack" …).
+source "$(dirname "$(readlink -f "$0")")/zig-common.sh"
+
+zig_sccache_reexec "$@"
+zig_filter_args "$@"
+xflag=()
+$ZIG_IS_COMPILE && xflag=(-x c++)
+exec zig c++ "${xflag[@]}" -target x86_64-linux-gnu.2.11 "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"
