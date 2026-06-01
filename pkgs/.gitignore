@@ -13,8 +13,26 @@ work/
 *.tar.gz
 *.tar.xz
 *.tar.bz2
+*.tar.zst
 *.tar.xz.sig
 *.tar.gz.sig
+*.tar.bz2.sig
+*.tar.zst.sig
+*.asc
 
 # Downloaded resources
 *.crt
+
+# msys-cross-pacman builds the AUR pacman-static from source: makepkg downloads
+# upstream tarballs, git-clones the VCS sources, and copies the AUR-vendored patches
+# (which live in deps/pacman-static/, not here) into the package dir. None are ours
+# to track. Our own patches are the tracked 000X-*.patch files, kept above this.
+/msys-cross-pacman/pacman/
+/msys-cross-pacman/brotli/
+/msys-cross-pacman/xz/
+/msys-cross-pacman/libseccomp/
+/msys-cross-pacman/ca-dir.patch
+/msys-cross-pacman/curl-*.patch
+/msys-cross-pacman/openssl-*.patch
+/msys-cross-pacman/pacman-revertme-*.patch
+/msys-cross-pacman/pacman-reproducible-builds.patch
