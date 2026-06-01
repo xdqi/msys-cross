@@ -1,0 +1,15 @@
+--- a/lib/libalpm/add.c
++++ b/lib/libalpm/add.c
+@@ -116,8 +116,10 @@
+ 	int ret;
+ 	struct archive *archive_writer;
+-	const int archive_flags = ARCHIVE_EXTRACT_OWNER |
+-	                          ARCHIVE_EXTRACT_PERM |
++	/* msys2-cross: ARCHIVE_EXTRACT_OWNER chowns every extracted file to the
++	 * package's authored uid/gid (0:0), which fails or wrongly roots files on a
++	 * non-root user-owned prefix. Dropped; the remaining flags are non-root-safe. */
++	const int archive_flags = ARCHIVE_EXTRACT_PERM |
+ 	                          ARCHIVE_EXTRACT_TIME |
+ 	                          ARCHIVE_EXTRACT_UNLINK |
+ 	                          ARCHIVE_EXTRACT_XATTR |
+ 	                          ARCHIVE_EXTRACT_SECURE_SYMLINKS;
