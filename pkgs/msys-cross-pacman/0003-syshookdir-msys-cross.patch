@@ -1,0 +1,20 @@
+--- a/meson.build
++++ b/meson.build
+@@ -68,7 +68,7 @@ conf.set_quoted('LOCALEDIR', LOCALEDIR)
+ conf.set_quoted('SCRIPTLET_SHELL', get_option('scriptlet-shell'))
+ conf.set_quoted('LDCONFIG', LDCONFIG)
+ conf.set_quoted('LIB_VERSION', libalpm_version)
+-conf.set_quoted('SYSHOOKDIR', join_paths(DATAROOTDIR, 'libalpm/hooks/'))
++conf.set_quoted('SYSHOOKDIR', join_paths(DATAROOTDIR, 'libalpm/msys-cross-hooks/'))
+ conf.set_quoted('CONFFILE', join_paths(SYSCONFDIR, 'pacman.conf'))
+ conf.set_quoted('DBPATH', join_paths(LOCALSTATEDIR, 'lib/pacman/'))
+ conf.set_quoted('GPGDIR', join_paths(SYSCONFDIR, 'pacman.d/gnupg/'))
+@@ -452,7 +452,7 @@ foreach path : [
+ 	join_paths(LOCALSTATEDIR, 'lib/pacman/'),
+ 	join_paths(LOCALSTATEDIR, 'cache/pacman/pkg/'),
+ 	join_paths(DATAROOTDIR, 'makepkg-template/'),
+-	join_paths(DATAROOTDIR, 'libalpm/hooks/'),
++	join_paths(DATAROOTDIR, 'libalpm/msys-cross-hooks/'),
+ 	]
+ 	meson.add_install_script('sh', '-c', 'mkdir -p "$DESTDIR/@0@"'.format(path))
+ endforeach
