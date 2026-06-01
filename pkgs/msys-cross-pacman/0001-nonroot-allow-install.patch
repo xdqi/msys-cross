@@ -1,0 +1,15 @@
+--- a/src/pacman/pacman.c
++++ b/src/pacman/pacman.c
+@@ -1223,7 +1223,11 @@
+ 	}
+
+ 	/* check if we have sufficient permission for the requested operation */
+-	if(myuid > 0 && needs_root()) {
++	/* msys2-cross: this static pacman installs into a user-owned, relocatable
++	 * --root prefix without privilege escalation, so the root gate is dropped.
++	 * Extraction is also patched to not chown (see add.c), so non-root install
++	 * is fully functional. */
++	if(0 && myuid > 0 && needs_root()) {
+ 		pm_printf(ALPM_LOG_ERROR, _("you cannot perform this operation unless you are root.\n"));
+ 		cleanup(EXIT_FAILURE);
+ 	}
