@@ -1,6 +1,8 @@
 # Maintainer: msys2-cross project
 _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_startdir/../../scripts/msys-cross-common.sh"
+# Shared helpers: copy_sysroot_pkg, _place_internal_libs
+source "$_startdir/../../scripts/extract-target-libs.sh"
 inherit_msys2 "gcc"
 
 # MSYS2 gcc PKGBUILD uses pkgbase=gcc, no _realname=
@@ -34,9 +36,14 @@ eval "$(declare -f _msys2_build | sed \
     -e 's|--without-libintl-prefix||' \
     -e 's|--enable-linker-build-id||' \
     -e 's|\${_arch_conf} ||' \
-    -e 's|--enable-libstdcxx-filesystem-ts;|--enable-libstdcxx-filesystem-ts --with-gmp=\"'"$_deps"'\" --with-mpfr=\"'"$_deps"'\" --with-mpc=\"'"$_deps"'\" --with-isl=\"'"$_deps"'\" --disable-libcc1 --disable-rpath --disable-werror --enable-lto --enable-fully-dynamic-string --enable-cloog-backend=isl;|' \
+    -e 's|--enable-libstdcxx-filesystem-ts;|--enable-libstdcxx-filesystem-ts --with-gmp=\"'"$_deps"'\" --with-mpfr=\"'"$_deps"'\" --with-mpc=\"'"$_deps"'\" --with-isl=\"'"$_deps"'\" --disable-libcc1 --disable-rpath --disable-werror --enable-lto --enable-fully-dynamic-string --enable-cloog-backend=isl --with-pkgversion=\"msys2-cross ${pkgver}-${pkgrel}\" --with-bugurl=\"https://github.com/xdqi/msys-cross/issues\";|' \
     -e 's|  | |g' \
-    -e 's|\bmake$|make -j"$(nproc)"|')"
+    -e 's|\bmake$|make -j"$(nproc)" all-gcc|')"
+# NOTE: unlike mingw, we KEEP --enable-version-specific-runtime-libs (the native
+# gcc base sets it). The upstream msys-repo gcc-15.2.0 we copy target libs from is
+# ALSO version-specific (libstdc++.a + C++ headers live under
+# lib/gcc/x86_64-pc-cygwin/<ver>/), so keeping it makes our driver search exactly
+# where those files are — no standard-layout relocation needed.
 
 # ---- Package metadata ----
 _our_pkgrel=1
@@ -127,32 +134,68 @@ build() {
     _msys2_build
 }
 
-# ---- _package_one — install + move from stage prefix to pkg root ----
+# ---- _package_one — HOST-only install + move from stage prefix to pkg root ----
+# Like build_gcc.sh / the mingw msys-cross-gcc package: we built only the host
+# compiler (make all-gcc), so we install ONLY the host driver + backends here. The
+# TARGET runtime libs (libgcc/crt, libstdc++, libsupc++, C++ headers) are supplied
+# by the upstream msys-repo gcc package and copied out of the build sysroot by the
+# package function below (copy_sysroot_pkg + _place_internal_libs). DESTDIR install
+# lands at ${pkgdir}${_stage_prefix}/...; the move below drains it to ${pkgdir}/.
 _package_one() {
     local target=$1
     cd "${srcdir}/gcc-build-${target}"
-    make -j1 DESTDIR="${pkgdir}" install
+    # C/C++ host install only (mirror the mingw _package_one): c++.install-common
+    # installs g++/c++ (+cc1plus); install-driver gives gcc/xgcc; the rest install
+    # the cpp driver, gcc-ar, headers, plugin headers, and lto-wrapper. We do NOT
+    # run "install" (it would try to install target libgcc/libstdc++ we never built).
+    make -C gcc -j1 DESTDIR="${pkgdir}" \
+        c++.install-common install-driver install-cpp install-gcc-ar \
+        install-headers install-plugin install-lto-wrapper
 
+    # Resolve the staged install prefix the same way the move below does, so the
+    # backend-binary backstop lands in the SAME staged libexec the move drains.
     local _pfx="${_stage_prefix:-${srcdir}/stage}"
     local _staged="${pkgdir}${_pfx}"
+    # cc1/cc1plus/collect2/lto1/lto-wrapper host backends (install-common would place
+    # them but we drop it; install them by hand like the mingw package).
+    for b in cc1 cc1plus collect2 lto1 lto-wrapper; do
+        [ -f "gcc/$b" ] && install -Dm755 "gcc/$b" "${_staged}/libexec/gcc/${target}/${pkgver}/$b" || true
+    done
+    # Host LTO linker plugin (built by "make all-gcc" under lto-plugin/.libs/), which
+    # "make -C gcc install-*" never installs; the default specs pass
+    # -fuse-linker-plugin so the driver refuses to run without it.
+    for _lto in lto-plugin/.libs/liblto_plugin.so gcc/liblto_plugin.so; do
+        if [ -f "$_lto" ]; then
+            install -Dm755 "$_lto" "${_staged}/libexec/gcc/${target}/${pkgver}/liblto_plugin.so"
+            break
+        fi
+    done
+
     if [ -d "$_staged" ]; then
         for _d in bin lib libexec share; do
             [ -e "$_staged/$_d" ] && mv "$_staged/$_d" "${pkgdir}/"
         done
+        # Target libs come from the upstream msys-repo gcc package (copied below).
         rm -rf "$_staged/$target"
         rm -rf "${pkgdir}/home"
     fi
 
     rm -rf "${pkgdir}/share"
     find "${pkgdir}" -name "*.exe" -delete
-    # Ensure -lgcc_s resolves. For cygwin, SHLIB_INSTALL installs libgcc_s.a
-    # to the versioned dir; move it to top-level lib/ and symlink back.
-    # Fallback: symlink to libgcc.a (which always exists).
+}
+
+# ---- _fixup_libgcc_s — make -lgcc_s resolve at the package-root version dir ----
+# Runs AFTER _place_internal_libs copies the upstream internal dir to the package
+# root. The msys-repo cygwin gcc ships libgcc.a + libgcc_eh.a + libgcc_s.dll.a but
+# NO static libgcc_s.a; libstdc++/libquadmath link with -lgcc_s, so symlink it to
+# libgcc.a (always present) so static linking resolves.
+_fixup_libgcc_s() {
+    local target=$1
     local _verlib="${pkgdir}/lib/gcc/${target}/${pkgver}"
     if [ -f "$_verlib/libgcc_s.a" ] && [ ! -L "$_verlib/libgcc_s.a" ]; then
         mv "$_verlib/libgcc_s.a" "${pkgdir}/lib/libgcc_s.a"
         ln -sf ../../../libgcc_s.a "$_verlib/libgcc_s.a"
-    elif [ ! -f "$_verlib/libgcc_s.a" ] && [ -f "$_verlib/libgcc.a" ]; then
+    elif [ ! -e "$_verlib/libgcc_s.a" ] && [ -f "$_verlib/libgcc.a" ]; then
         ln -sf libgcc.a "$_verlib/libgcc_s.a"
     fi
 }
@@ -162,4 +205,20 @@ package_msys-cross-cygwin-gcc() {
     depends=(msys-cross-filesystem msys-cross-cygwin-binutils
              msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime)
     _package_one "x86_64-pc-cygwin"
+    # Target libs (libgcc/crt, libstdc++, libsupc++, C++ headers) come from the
+    # upstream msys-repo gcc package installed in the build sysroot under usr/.
+    # The triple (x86_64-pc-cygwin) and version (15.2.0) match ours exactly, so no
+    # remap is needed; they land under the sysroot subdir "usr", which the
+    # filesystem package's "x86_64-pc-cygwin -> usr" symlink resolves the cross-gcc
+    # search path to.
+    copy_sysroot_pkg "$_bootstrap_prefix" "gcc" "$pkgdir"
+    # Our host driver lives in the package-root bin/ and searches the package-root
+    # lib/gcc/<triple>/<ver>/ — NOT usr/lib/gcc/... (the x86_64-pc-cygwin -> usr
+    # symlink only resolves <prefix>/<triple>/..., not <prefix>/lib/gcc/...). So
+    # place the whole upstream version dir (libgcc.a/crt*.o AND, since we keep
+    # version-specific layout, libstdc++.a + the C++ headers) at the package root.
+    _place_internal_libs "x86_64-pc-cygwin" usr
+    # Ensure -lgcc_s resolves at the package-root internal dir.
+    _fixup_libgcc_s "x86_64-pc-cygwin"
+    find "${pkgdir}" -name "*.exe" -delete
 }

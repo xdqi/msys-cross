@@ -81,8 +81,15 @@ _pacman -Sy \
     mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran
 
 echo "=== Installing cygwin/msys sysroot ==="
+# Also install the msys-repo gcc package (pulls gcc-libs etc.): like msys-cross-gcc,
+# msys-cross-cygwin-gcc builds only the host compiler (make all-gcc) and sources the
+# TARGET runtime libs (libgcc/crt, libstdc++, libsupc++, C++ headers) by copying them
+# out of this sysroot via copy_sysroot_pkg. The triple (x86_64-pc-cygwin) and version
+# (15.2.0) match ours exactly, so pacman resolves them with no remap. Do NOT add
+# gcc-fortran (the cygwin port ships no Fortran).
 _pacman -Sy \
-    msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime
+    msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime \
+    gcc
 
 echo
 echo "=== Bootstrap prefix ready ==="
