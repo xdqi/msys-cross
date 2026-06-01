@@ -44,7 +44,6 @@ download, the three fixes expressed at the source where intent is explicit.
   deleted.
 - **Hook dir name:** redirect `SYSHOOKDIR` to `/usr/share/libalpm/msys-cross-hooks/`
   (a meaningful name, not `.nope`).
-- **Man page:** `package()` also installs a `msys-pacman` man page.
 - **Workspace:** done in an isolated worktree; the submodule was committed first.
 
 ## Architecture
@@ -80,8 +79,7 @@ version vars so the package can reuse and selectively override them.
 3. **prepare()** wraps `_aur_prepare` and then applies our 3 source patches to the
    `pacman/` tree.
 4. **package()** overrides `_aur_package`: install only `libexec/pacman-static`,
-   the `msys-pacman` wrapper (`bin/`), `pacman.conf` (`etc/pacman.d/`), and a
-   `msys-pacman` man page (`share/man/man1/msys-pacman.1`).
+   the `msys-pacman` wrapper (`bin/`), and `pacman.conf` (`etc/pacman.d/`).
 5. **check()** reworked to validate the source-patched binary behaviourally
    (non-root gate passes; no chown; redirected hook dir present) — no byte asserts.
 
@@ -122,7 +120,7 @@ pkgs/msys-cross-pacman/PKGBUILD
    prepare(): _aur_prepare + 0001/0002/0003 source patches
    build():   _aur_build with CC/LDFLAGS re-exported (zigcc gnu.2.11,
               mostly-static) + openssl CARCH pinned → 13 static deps → pacman-static
-   package(): pacman-static + wrapper + pacman.conf + man page
+   package(): pacman-static + wrapper + pacman.conf
    check():   behavioural assertions on the source-patched binary
 ```
 
