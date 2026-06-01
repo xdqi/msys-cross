@@ -67,6 +67,40 @@ inherit_msys2() {
     eval "$(declare -f build 2>/dev/null | sed 's/^build /_msys2_build /' || echo '_msys2_build() { true; }')"
 }
 
+# AUR package source root (submodule under deps/<name>).
+_aur_root="${AUR_PACKAGES:-$_project_root/deps}"
+
+inherit_aur() {
+    # $1 = AUR package dir name under deps/ (e.g. "pacman-static")
+    local _aur_dir="$_aur_root/$1"
+    local _aur_pkgbuild="$_aur_dir/PKGBUILD"
+
+    # Source the raw AUR PKGBUILD. Its top-level body sets CC=musl-gcc and
+    # LDFLAGS=-static; the caller re-exports CC/LDFLAGS AFTER this returns, so the
+    # caller's values win (build() reads ${CC}/${LDFLAGS} at call time).
+    source "$_aur_pkgbuild"
+
+    # Drop Arch makedepends/pgp checks we don't honor in this repo.
+    makedepends=()
+    validpgpkeys=()
+    for i in "${!sha512sums[@]}"; do sha512sums[$i]='SKIP'; done
+    [ -n "${sha256sums+x}" ] && for i in "${!sha256sums[@]}"; do sha256sums[$i]='SKIP'; done
+
+    # Local (non-URL) source entries become file:// against the AUR dir so makepkg
+    # finds the vendored patches/keys.
+    for i in "${!source[@]}"; do
+        case "${source[$i]}" in
+            *://*) ;;
+            *) source[$i]="file://$_aur_dir/${source[$i]}" ;;
+        esac
+    done
+
+    # Save the AUR functions for chaining/overriding.
+    eval "$(declare -f prepare 2>/dev/null | sed 's/^prepare /_aur_prepare /' || echo '_aur_prepare() { true; }')"
+    eval "$(declare -f build   2>/dev/null | sed 's/^build /_aur_build /'     || echo '_aur_build() { true; }')"
+    eval "$(declare -f package 2>/dev/null | sed 's/^package /_aur_package /' || echo '_aur_package() { true; }')"
+}
+
 # Warning noise from building GCC's tree with zig cc (clang) is handled in the
 # zigcc/zigc++ wrappers, which strip GCC's bare -Wall/-Wextra/-W/-Werror switches
 # (clang-only diagnostics that don't apply to GCC's code). Nothing to do here.
