@@ -61,26 +61,38 @@ jobs:
       # sccache when SCCACHE_PATH is set (they hand it a single-exec shim so sccache
       # — which can't parse the two-token `zig cc` — sees a cacheable clang). This
       # turns the ~1.5h cold gcc/binutils compile into a near-cache-hit rebuild on
-      # re-runs. SCCACHE_GHA_ENABLED uses the Actions cache as the object store;
-      # the env is exported to $GITHUB_ENV so it survives the drop to builduser.
+      # re-runs. Only the sccache BINARY is needed from this action; the backend is
+      # configured below.
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.10
         with:
           version: "v0.10.0"
-      # The GHA cache backend needs ACTIONS_RESULTS_URL + ACTIONS_RUNTIME_TOKEN,
-      # which aren't exposed to plain `run:` steps — export them (and the sccache
-      # enable flags) to $GITHUB_ENV so build.sh, and builduser via runuser, can
-      # reach the object store.
-      - name: Export sccache GHA tokens
-        uses: actions/github-script@v9
-        with:
-          script: |
-            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-      - name: Enable sccache GHA backend
+      # Backend = LOCAL DISK (SCCACHE_DIR), NOT the GHA object store. sccache's GHA
+      # backend stores every .o as a separate Actions-cache entry; with ~10k tiny
+      # objects (35% <10 KiB) that hits per-request throttling (429s — we saw 176
+      # cache errors in one run) and slow per-object transfer, so even at ~59% hit
+      # rate the wall-clock gain nearly vanished (a known sccache×GHA limitation:
+      # mozilla/sccache#1485, community #55049). Instead we point sccache at a local
+      # dir and let ONE actions/cache step pack the whole dir into a SINGLE cache
+      # entry (one upload / one download), restored across runs below.
+      - name: Configure sccache (local disk backend)
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/build/sccache-cache" >> "$GITHUB_ENV"
+          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
           echo "SCCACHE_PATH=${SCCACHE_PATH}" >> "$GITHUB_ENV"
+      # Restore/save the whole sccache dir as one packed entry. Unique key (run_id)
+      # so every run writes a fresh entry (Actions caches are immutable per key);
+      # restore-keys falls back to the newest prior entry — same branch first, then
+      # any — so each run inherits the previous run's objects plus its own increment.
+      # actions/cache auto-evicts under the 7-day / 10 GiB repo LRU.
+      - name: Cache sccache objects
+        uses: actions/cache@v5
+        with:
+          path: build/sccache-cache
+          key: sccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ github.ref_name }}-
+            sccache-${{ runner.os }}-
 
       # The gcc/binutils versions are NOT in our PKGBUILDs — inherit_msys2 greps
       # them from the MSYS2-packages submodule at build time. So the pkg-source
