@@ -29,6 +29,7 @@ pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 pkgbase=msys-cross-gcc
 pkgname=(
     msys-cross-mingw64-gcc
+    msys-cross-mingw64-gcc-fortran
     msys-cross-mingw32-gcc
     msys-cross-ucrt64-gcc
 )
@@ -110,13 +111,16 @@ build() {
 _package_one() {
     local target=$1
     cd "${srcdir}/gcc-build-${target}"
-    # GCC 16's gcc/Makefile has no "install-gcc" or standalone "c++.install-common"
-    # target. "install-common" depends on lang.install-common (c/c++/fortran/lto
-    # install-common), so it installs the gcc/g++/gfortran drivers plus the
-    # backend compilers (cc1/cc1plus/f951) via its COMPILERS loop — exactly the
-    # host-only set we want, without touching the target runtime libraries.
+    # C/C++ only. "install-common" pulls in lang.install-common
+    # (c/c++/fortran/lto.install-common) which would also install the gfortran
+    # driver — that belongs in the separate -gcc-fortran subpackage. Use
+    # "c++.install-common" instead: it installs g++/c++ (and cc1plus); the C
+    # driver (gcc/xgcc) comes from "install-driver", which is in the list below.
+    # The cc1/cc1plus/lto1/collect2 backends are installed by the explicit loop
+    # further down (COMPILERS would also place them via install-common, but we
+    # drop install-common to keep Fortran out).
     make -C gcc -j1 DESTDIR="${pkgdir}" \
-        install-common install-driver install-cpp install-gcc-ar \
+        c++.install-common install-driver install-cpp install-gcc-ar \
         install-headers install-plugin install-lto-wrapper
 
     # Resolve the staged install prefix the same way the move below does, so the
@@ -163,8 +167,41 @@ _package_one() {
     fi
 }
 
+# ---- _package_one_fortran — gfortran driver + f951 backend (host) + libgfortran ----
+# Fortran subpackage: gfortran driver + f951 backend (host) + libgfortran (target,
+# repackaged from upstream). Split out so users who don't need Fortran install
+# only the smaller -gcc package. Mirrors upstream native package_gcc-fortran():
+# fortran.install-common installs the gfortran driver; f951 is installed by hand
+# (the build Makefile only installs it via install-common's COMPILERS loop, which
+# we deliberately don't run here); libgfortran.a/.dll.a/.spec + finclude .mod
+# files come from the upstream -gcc-fortran binary package.
+_package_one_fortran() {
+    local target=$1 fpkg=$2
+    cd "${srcdir}/gcc-build-${target}"
+    make -C gcc -j1 DESTDIR="${pkgdir}" fortran.install-common
+    local _pfx="${_stage_prefix:-${srcdir}/stage}"
+    local _staged="${pkgdir}${_pfx}"
+    # f951 backend binary (host)
+    [ -f "gcc/f951" ] && install -Dm755 "gcc/f951" "${_staged}/libexec/gcc/${target}/${pkgver}/f951"
+    if [ -d "$_staged" ]; then
+        # Move (not copy) the staged host bits to the package root. The -gcc and
+        # -gcc-fortran packages build from the SAME build dir but install disjoint
+        # files (c++.install-common vs fortran.install-common have no overlap),
+        # so a plain mv is safe and avoids any cross-package file claim.
+        for _d in bin lib libexec share; do
+            [ -e "$_staged/$_d" ] && mv "$_staged/$_d" "${pkgdir}/"
+        done
+        rm -rf "$_staged/$target" "${pkgdir}/home"
+    fi
+    rm -rf "${pkgdir}/share"
+    find "${pkgdir}" -name "*.exe" -delete
+    # libgfortran.a/.dll.a/.spec + finclude/.mod + libcaf_*.a from upstream -gcc-fortran
+    bash "$_startdir/../../scripts/extract-target-libs.sh" \
+        "$srcdir/$fpkg" "$target" "$pkgver" "$pkgdir" "" mingw64
+}
+
 package_msys-cross-mingw64-gcc() {
-    pkgdesc="Cross GCC for x86_64-w64-mingw32 target (gcc/g++/gfortran)"
+    pkgdesc="Cross GCC for x86_64-w64-mingw32 target (gcc/g++)"
     depends=(msys-cross-filesystem msys-cross-mingw64-binutils
              mingw-w64-x86_64-headers mingw-w64-x86_64-crt
              mingw-w64-x86_64-winpthreads mingw-w64-x86_64-gcc-libs
@@ -177,14 +214,20 @@ package_msys-cross-mingw64-gcc() {
     # The runtime libs/headers go under the MSYS2 sysroot subdir (mingw64), which
     # the filesystem package's "x86_64-w64-mingw32 -> mingw64" symlink resolves
     # the cross-gcc search path to (avoids a real-dir vs symlink install clash).
+    # C/C++ libs only — libgfortran moves to the -gcc-fortran subpackage.
     bash "$_startdir/../../scripts/extract-target-libs.sh" \
         "$srcdir/mingw-w64-x86_64-gcc-16.1.0-5-any.pkg.tar.zst" \
-        "x86_64-w64-mingw32" "$pkgver" "$pkgdir" "" "mingw64" \
-        "$srcdir/mingw-w64-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst"
+        "x86_64-w64-mingw32" "$pkgver" "$pkgdir" "" "mingw64"
+}
+
+package_msys-cross-mingw64-gcc-fortran() {
+    pkgdesc="Cross GFortran for x86_64-w64-mingw32 target"
+    depends=(msys-cross-mingw64-gcc mingw-w64-x86_64-gcc-libs)
+    _package_one_fortran "x86_64-w64-mingw32" "mingw-w64-x86_64-gcc-fortran-16.1.0-1-any.pkg.tar.zst"
 }
 
 package_msys-cross-mingw32-gcc() {
-    pkgdesc="Cross GCC for i686-w64-mingw32 target (gcc/g++/gfortran)"
+    pkgdesc="Cross GCC for i686-w64-mingw32 target (gcc/g++)"
     depends=(msys-cross-filesystem msys-cross-mingw32-binutils
              mingw-w64-i686-headers mingw-w64-i686-crt
              mingw-w64-i686-winpthreads mingw-w64-i686-gcc-libs
@@ -193,7 +236,7 @@ package_msys-cross-mingw32-gcc() {
 }
 
 package_msys-cross-ucrt64-gcc() {
-    pkgdesc="Cross GCC for x86_64-w64-mingw32ucrt target (gcc/g++/gfortran)"
+    pkgdesc="Cross GCC for x86_64-w64-mingw32ucrt target (gcc/g++)"
     depends=(msys-cross-filesystem msys-cross-ucrt64-binutils
              mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt
              mingw-w64-ucrt-x86_64-winpthreads mingw-w64-ucrt-x86_64-gcc-libs

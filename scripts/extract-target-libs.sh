@@ -48,7 +48,10 @@ if [ -d "$src/include/c++" ]; then
     cp -a "$src/include/c++/." "$pkgdir$sp/$subdir/include/c++/"
 fi
 
-# runtime DLLs → <subdir>/bin/
-mkdir -p "$pkgdir$sp/$subdir/bin"
-find "$src" -name "lib*.dll" -exec cp -a {} "$pkgdir$sp/$subdir/bin/" \; 2>/dev/null || true
+# NOTE: deliberately NO DLL sweep here. We only extract link-time artifacts
+# (.a, .dll.a import libs, .spec, .o crt, C++/Fortran headers — all covered by
+# the cp -a of $src/lib above). Runtime DLLs (libstdc++-6.dll, libgfortran-5.dll,
+# libgcc_s_seh-1.dll, ...) are provided by the sysroot mingw-w64-*-gcc-libs
+# dependency, not by us. A blanket `find -name lib*.dll` here would also wrongly
+# sweep the HOST liblto_plugin.dll into the target bin dir.
 echo "extracted target libs for $target ($subdir) from $(basename "$pkg")"
