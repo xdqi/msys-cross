@@ -17,6 +17,7 @@ eval "$(declare -f _build | sed \
     -e 's|CFLAGS="-O2 -pipe"|CFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
     -e 's|CXXFLAGS="-O2 -pipe"|CXXFLAGS="-O2 -I'"$_deps"'/include -fbracket-depth=512 -Wno-error"|g' \
     -e 's|--enable-version-specific-runtime-libs|--disable-version-specific-runtime-libs --with-pkgversion="msys2-cross ${pkgver}-${pkgrel}" --with-bugurl="https://github.com/xdqi/msys-cross/issues"|g' \
+    -e 's|--enable-threads=\${_threads}|--enable-threads=posix|g' \
     -e 's|\bmake all\b|make -j"$(nproc)" all-gcc|g')"
 
 # ---- Package metadata ----
