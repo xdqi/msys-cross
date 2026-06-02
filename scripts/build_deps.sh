@@ -139,8 +139,10 @@ make -j"$JOBS" && make install
 echo "=== zstd ==="
 cd "$WORK_DEPS/zstd-${ZSTD_VER}/lib"
 CFLAGS="-O2 -fPIC" make -j"$JOBS" libzstd.a
-cp libzstd.a "$PREFIX/lib/"
-cp zstd.h zdict.h zstd_errors.h "$PREFIX/include/"
+# install-pc emits lib/pkgconfig/libzstd.pc (needed by pkg-config consumers such as
+# the from-source pacman build); install-static + install-includes give libzstd.a +
+# headers — same artifacts the old manual cp produced, plus the .pc.
+make PREFIX="$PREFIX" install-pc install-static install-includes
 
 # .so->.a symlinks for zig's no_fallback linker
 for lib in gmp mpfr mpc isl z zstd; do
