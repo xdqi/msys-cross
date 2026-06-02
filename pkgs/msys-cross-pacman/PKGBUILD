@@ -53,6 +53,23 @@ export LDFLAGS=""
 # Make CC a single token usable in the AUR build()'s `sed s|CC=gcc|CC=${CC}|`.
 export CC CXX AR RANLIB
 
+# ---- Reuse build_deps' prebuilt zlib/zstd (HARD dependency on deps/install) ----
+# pacman would otherwise recompile zlib+zstd that scripts/build_deps.sh already
+# built into $_deps. We reuse those instead. In the full build.sh flow build_deps
+# runs before this package; a standalone build of msys-cross-pacman MUST run
+# scripts/build_deps.sh first. Fail loudly (not mid-build) if they're absent.
+_require_builddeps_libs() {
+    local missing=0 f
+    for f in lib/libz.a lib/libzstd.a lib/pkgconfig/zlib.pc lib/pkgconfig/libzstd.pc \
+             include/zlib.h include/zstd.h; do
+        [ -e "$_deps/$f" ] || { echo "ERROR: $_deps/$f missing" >&2; missing=1; }
+    done
+    [ "$missing" -eq 0 ] || {
+        echo "ERROR: build_deps zlib/zstd not found — run scripts/build_deps.sh first" >&2
+        return 1
+    }
+}
+
 # ---- prepare(): AUR prepare + our 3 source patches ----
 prepare() {
     _aur_prepare
@@ -63,22 +80,47 @@ prepare() {
     done
 }
 
-# ---- build(): inherited AUR build, with our CC/LDFLAGS already exported ----
+# ---- build(): reuse build_deps zlib/zstd, then the inherited AUR build ----
 build() {
-    # libarchive's AUR build line REPLACES the env CFLAGS with a bare
-    #   CFLAGS="-L${srcdir}/temp/usr/lib"
-    # (it assumes the host toolchain already defaults to an optimised, no-sanitizer
-    # build). Under zig cc that assumption is wrong on both counts: dropping our
-    # -O2 leaves clang at -O0, AND zig cc — unlike GNU gcc — turns on -fsanitize=
-    # undefined by DEFAULT, so at -O0 every UB-check site emits an external
-    # __ubsan_handle_* reference. libarchive.a then carries 600+ such undefined
-    # symbols and the final pacman link fails ("ld.lld: undefined symbol:
-    # __ubsan_handle_builtin_unreachable", ...) because we link only the static .a
-    # archives, not zig's compiler_rt/ubsan runtime. gcc never emits these; restore
-    # gcc parity for just libarchive by re-adding -O2 and -fno-sanitize=undefined to
-    # its CFLAGS override (other deps keep our exported CFLAGS and are unaffected).
-    eval "$(declare -f _aur_build | sed \
-        's|CFLAGS="-L${srcdir}/temp/usr/lib"|CFLAGS="-L${srcdir}/temp/usr/lib -O2 -fno-sanitize=undefined"|')"
+    _require_builddeps_libs
+
+    # Seed $srcdir/temp/usr (the dir every AUR dep installs into) with build_deps'
+    # zlib/zstd: static libs, headers, and pkg-config files. Consumers find them
+    # here exactly as if the AUR had built them (curl via --with-zlib/zstd-*=temp/usr,
+    # libarchive/pacman via PKG_CONFIG_PATH=temp/usr/lib/pkgconfig).
+    local t="${srcdir}/temp/usr"
+    mkdir -p "$t/lib/pkgconfig" "$t/include"
+    cp -a "$_deps/lib/libz.a" "$_deps/lib/libzstd.a" "$t/lib/"
+    cp -a "$_deps/include/zlib.h" "$_deps/include/zconf.h" "$t/include/"
+    cp -a "$_deps/include/zstd.h" "$_deps/include/zdict.h" "$_deps/include/zstd_errors.h" "$t/include/"
+    cp -a "$_deps/lib/pkgconfig/zlib.pc" "$_deps/lib/pkgconfig/libzstd.pc" "$t/lib/pkgconfig/"
+
+    # Rewrite the inherited AUR build():
+    #  (1) awk: drop its zstd block (cd zstd .. before cd brotli) and zlib block
+    #      (cd zlib .. before cd openssl) — we supplied those from build_deps above.
+    #      The blocks are delimited by the next dep's `cd "${srcdir}"/<dep>` line, which
+    #      is stable under `declare -f`.
+    #  (2) sed: the libarchive CFLAGS fix (re-add -O2 -fno-sanitize=undefined; zig cc
+    #      defaults -fsanitize=undefined on, which the bare AUR CFLAGS override would
+    #      otherwise leave at -O0 and pull 600+ __ubsan_* into the static link).
+    eval "$(declare -f _aur_build \
+        | awk '
+            /cd "\$\{srcdir\}"\/zstd-\$\{_zstdver\}\/lib;/ { skip=1 }
+            /cd "\$\{srcdir\}"\/brotli;/                   { skip=0 }
+            /cd "\$\{srcdir\}\/"zlib-\$\{_zlibver\};/      { skip=1 }
+            /cd "\$\{srcdir\}"\/openssl-\$\{_sslver\};/    { skip=0 }
+            skip==0 { print }
+          ' \
+        | sed 's|CFLAGS="-L${srcdir}/temp/usr/lib"|CFLAGS="-L${srcdir}/temp/usr/lib -O2 -fno-sanitize=undefined"|')"
+
+    # Guard: if a future AUR bump moves the zstd/zlib `cd` anchors, the awk silently
+    # stops removing them — assert the blocks are actually gone so we fail loudly
+    # rather than silently recompiling (or worse, mis-deleting).
+    if declare -f _aur_build | grep -qE 'make libzstd\.a|make libz\.a'; then
+        echo "ERROR: AUR zstd/zlib blocks not neutralized — anchors changed?" >&2
+        return 1
+    fi
+
     _aur_build
 }
 
