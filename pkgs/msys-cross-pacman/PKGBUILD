@@ -142,6 +142,37 @@ build() {
         return 1
     fi
 
+    # ---- macOS host (arm64) cross overrides ----
+    # When building for a darwin host (CARCH=arm64, set by makepkg-darwin-arm64.conf), the
+    # deps cross-compile under zig with a few adjustments (verified standalone; see
+    # docs/.../2026-06-02-darwin-pacman-cross-probe.md). All but two are autoconf cache
+    # variables — exported here, since autoconf reads ac_cv_* straight from the environment,
+    # so no configure-line surgery is needed for them. (AR=zig ar --format=darwin is handled
+    # in setup_zig_env.)
+    if [ "${CARCH}" = "arm64" ]; then
+        # libarchive: its autoconf link-tests for these wchar funcs misfire under zig+darwin
+        # (macOS HAS them), so it would declare static fallbacks that clash with the SDK's
+        # non-static decls. Tell configure they exist.
+        export ac_cv_func_wcscpy=yes ac_cv_func_wcslen=yes ac_cv_func_wcscmp=yes \
+               ac_cv_func_wcrtomb=yes ac_cv_func_wctomb=yes \
+               ac_cv_func_wmemcmp=yes ac_cv_func_wmemcpy=yes ac_cv_func_wmemmove=yes
+        # libarchive: zig's macOS SDK has no <membership.h>, so don't select the darwin disk
+        # ACL backend (archive_disk_acl_darwin.c). pacman needs no disk ACLs.
+        export ac_cv_header_membership_h=no ac_cv_func_mbr_uid_to_uuid=no \
+               ac_cv_func_mbr_uuid_to_id=no ac_cv_have_decl_ACL_TYPE_EXTENDED=no \
+               ac_cv_have_decl_ACL_TYPE_NFS4=no
+        # curl: macOS pthread is in libSystem, not -lpthread (autoconf misses it).
+        export ac_cv_func_pthread_create=yes
+        # Two configure-line edits (not cache vars):
+        #  - openssl's CARCH case has no arm64 arm → add the darwin64-arm64-cc target.
+        #  - curl: --disable-ipv6 (drops curl's macos.c, which would pull the
+        #    SystemConfiguration framework zig's SDK lacks; macOS still resolves via the
+        #    standard getaddrinfo — only the system DNS/proxy-pref read is skipped).
+        eval "$(declare -f _aur_build \
+            | sed 's@\([[:space:]]*\)x86_64)@\1arm64)\n\1    openssltarget=darwin64-arm64-cc\n\1    optflags=;;\n\1x86_64)@' \
+            | sed 's@--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt @--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --disable-ipv6 @')"
+    fi
+
     _aur_build
 }
 

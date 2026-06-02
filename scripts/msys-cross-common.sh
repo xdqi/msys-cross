@@ -138,7 +138,14 @@ setup_zig_env() {
     export PATH="$_install_prefix/bin:$_zig_path:$PATH"
     export CC="$_wrappers/zigcc"
     export CXX="$_wrappers/zigc++"
-    export AR="zig ar"
+    # On a macOS target, archives must be Mach-O/BSD format: a plain `zig ar` (defaults to
+    # gnu) produces a GNU-format archive of Mach-O .o that zig's Mach-O LINKER then rejects
+    # with "unknown cpu architecture" (it misreads the GNU symbol table). --format=darwin
+    # fixes it. On Linux keep the default gnu archive.
+    case "${ZIG_TARGET:-}" in
+        *macos*|*darwin*) export AR="zig ar --format=darwin" ;;
+        *)                export AR="zig ar" ;;
+    esac
     export RANLIB="zig ranlib"
     export CFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
     export CXXFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
