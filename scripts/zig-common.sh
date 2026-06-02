@@ -43,20 +43,27 @@ zig_sccache_reexec() {
 # zig_handle_dumpmachine "$@"
 # GNU gcc's `-dumpmachine` prints the bare target triple and exits 0; build systems
 # (meson — meson.build:273 detect_machine_info) run it to learn the target. Our
-# wrappers drive `zig cc -target x86_64-linux-gnu.2.11`, and `zig cc -dumpmachine`
-# echoes that target as `x86_64-unknown-linux-gnu.2.11` on stdout but THEN re-parses
-# its own target string, rejects the glibc-version field with
+# wrappers drive `zig cc -target $ZIG_CC_TARGET`, and `zig cc -dumpmachine` echoes that
+# target (e.g. `x86_64-unknown-linux-gnu.2.11`) but THEN re-parses its own target string,
+# rejects the glibc/OS-version field with
 #   zig: error: version '.2.11' in target triple '…' is invalid
-# and exits 1 — so meson aborts. A normal GNU machine triple carries no glibc-version
-# suffix, so emulate gcc: if -dumpmachine is requested, print the clean triple and
-# exit 0 before handing off to zig. Call FIRST in the wrapper (it may exit).
+# and exits 1 — so meson aborts. A normal GNU machine triple carries no version suffix,
+# so emulate gcc: print a clean GNU-style triple derived from ZIG_CC_TARGET and exit 0
+# before handing off to zig. Call FIRST in the wrapper (it may exit). The triple must
+# track the actual target so a non-default ZIG_TARGET (e.g. a macOS host) reports right.
 zig_handle_dumpmachine() {
     local a
     for a in "$@"; do
-        if [ "$a" = "-dumpmachine" ]; then
-            echo "x86_64-unknown-linux-gnu"
-            exit 0
-        fi
+        [ "$a" = "-dumpmachine" ] || continue
+        # Map ZIG_CC_TARGET -> GNU-style machine triple (strip the version suffix; use
+        # the vendor/os spelling GNU toolchains expect).
+        case "${ZIG_CC_TARGET}" in
+            *macos*)   echo "${ZIG_CC_TARGET%%-*}-apple-darwin20" ;;   # aarch64-macos.11.0 -> aarch64-apple-darwin20
+            x86_64-linux-gnu*)  echo "x86_64-unknown-linux-gnu" ;;
+            aarch64-linux-gnu*) echo "aarch64-unknown-linux-gnu" ;;
+            *) echo "${ZIG_CC_TARGET%%.*}" ;;                          # generic: drop any .version
+        esac
+        exit 0
     done
 }
 
