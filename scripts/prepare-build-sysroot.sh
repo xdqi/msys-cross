@@ -91,55 +91,69 @@ _pacman -Sy \
     msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime \
     gcc
 
-echo "=== Fetching specs-helper gcc drivers (for darwin/foreign-host GCC builds) ==="
+echo "=== Generating wine specs-helpers (for darwin/foreign-host GCC builds) ==="
 # A Canadian-cross GCC build (build=linux, host=foreign e.g. arm64 macOS, target=mingw/
-# cygwin) can't run its own host xgcc for make's `specs` pass (GCC_FOR_TARGET -dumpspecs)
-# on the Linux build machine. The dumped specs depend ONLY on the target, so the GCC
-# PKGBUILDs override GCC_FOR_TARGET to a build-runnable same-target gcc: the project's own
-# x86_64-linux-hosted msys-cross-<target>-gcc.
+# cygwin) can't run its own host xgcc for make's `specs`/`self-test` passes
+# (`$(GCC_FOR_TARGET) -dumpspecs`/`-fself-test`) on the Linux build machine — the host
+# xgcc is an arm64 Mach-O. The dumped specs depend ONLY on the target, so the GCC
+# PKGBUILDs override GCC_FOR_TARGET to a build-runnable, SAME-target gcc.
 #
-# We need the gcc DRIVER + its backends (libexec cc1/cc1plus/lto1/collect2): `-dumpspecs`
-# only needs the driver, but GCC's `all-gcc` ALSO runs the host self-tests
-# (`$(GCC_FOR_SELFTESTS) -fself-test`), whose recipe invokes the driver which spawns cc1.
-# A driver-only helper makes that fail ("cannot execute 'cc1'"); with the backends present
-# the driver finds its relative ../libexec/.../cc1 and the self-test no-ops out ("self-tests
-# are not enabled in this build"). So extract bin/<triple>-gcc + libexec/gcc/** (~136 MB
-# each — still ~half the full ~1.2 GB package, and no deps, no root). Land them in
-# $OUT/specs-helper, a fixed path deliberately NOT on PATH so these build-time helpers can
-# never shadow the cross toolchain.
-SPECS_REPO="${MSYS_CROSS_REPO:-https://msys.kosaka.moe/repo}"
+# The MSYS2 sysroots installed above ALREADY include the native Windows gcc.exe for each
+# target (bin/<triple>-gcc.exe + cc1.exe + DLLs) — they're SAME-target gccs, so running
+# them under wine produces identical specs and lets -fself-test no-op. We write a tiny
+# wine wrapper per target into $OUT/specs-helper/bin/<our-triple>-gcc (a fixed path the
+# GCC PKGBUILDs reference, deliberately NOT on PATH). This needs no remote download and
+# no dependency on the linux package build, so the darwin build can run fully in parallel.
+# Requires `wine` (the darwin entrypoint installs it; on a linux-only run the wrappers are
+# simply never invoked).
 SPECS_ROOT="$OUT/specs-helper"
+SPECS_WINEPREFIX="$SPECS_ROOT/.wine"
 mkdir -p "$SPECS_ROOT/bin"
-# target subdir -> gcc triple (the driver name inside each package is <triple>-gcc).
-declare -A _SPECS_TRIPLE=(
-    [mingw32]=i686-w64-mingw32 [mingw64]=x86_64-w64-mingw32
-    [ucrt64]=x86_64-w64-mingw32ucrt [cygwin]=x86_64-pc-cygwin
+# our darwin target triple  ->  "sysroot-subdir:exe-basename" of the native gcc.exe.
+# NB: MSYS2's ucrt64 gcc is internally triple x86_64-w64-mingw32 (the exe is named so),
+# even though our ucrt darwin target triple is x86_64-w64-mingw32ucrt — the dumped specs
+# are target-identical, so the ucrt wrapper invokes the ucrt64 sysroot's exe.
+declare -A _SPECS_SRC=(
+    [i686-w64-mingw32]="mingw32:i686-w64-mingw32-gcc.exe"
+    [x86_64-w64-mingw32]="mingw64:x86_64-w64-mingw32-gcc.exe"
+    [x86_64-w64-mingw32ucrt]="ucrt64:x86_64-w64-mingw32-gcc.exe"
+    [x86_64-pc-cygwin]="usr:x86_64-pc-cygwin-gcc.exe"
 )
-# Resolve current package FILENAMEs from the repo db so versions track the repo (and
-# cygwin's distinct version is handled automatically — no hardcoding).
-_specs_tmp="$SPECS_ROOT/.dbtmp"
-rm -rf "$_specs_tmp"; mkdir -p "$_specs_tmp"
-if curl -fsSL --connect-timeout 20 --retry 3 "$SPECS_REPO/msys-cross.db" -o "$_specs_tmp/db.tar.gz" \
-   && tar xf "$_specs_tmp/db.tar.gz" -C "$_specs_tmp" 2>/dev/null; then
-    for _sub in mingw32 mingw64 ucrt64 cygwin; do
-        _tr="${_SPECS_TRIPLE[$_sub]}"
-        _fn=$(grep -hoE "msys-cross-${_sub}-gcc-[0-9][^/]*-x86_64\.pkg\.tar\.zst" "$_specs_tmp"/*/desc 2>/dev/null | sort -u | head -1)
-        if [ -z "$_fn" ]; then echo "  WARNING: no $_sub gcc in repo db (skip)"; continue; fi
-        if curl -fsSL --connect-timeout 30 --retry 3 "$SPECS_REPO/$_fn" -o "$_specs_tmp/pkg.zst" \
-           && bsdtar xf "$_specs_tmp/pkg.zst" -C "$SPECS_ROOT" \
-                "bin/${_tr}-gcc" "libexec/gcc" 2>/dev/null \
-           && [ -x "$SPECS_ROOT/bin/${_tr}-gcc" ]; then
-            echo "  + ${_tr}-gcc + libexec backends  (from $_fn)"
-        else
-            echo "  WARNING: failed to extract ${_tr}-gcc from $_fn"
+if command -v wine >/dev/null 2>&1; then
+    # One shared wineprefix, initialized once (no Windows-version tweak needed — verified
+    # that cygwin/mingw gcc.exe -dumpspecs emit identical specs on a default prefix).
+    WINEPREFIX="$SPECS_WINEPREFIX" WINEDEBUG=-all wineboot -i >/dev/null 2>&1 || true
+    for _tr in "${!_SPECS_SRC[@]}"; do
+        _sub="${_SPECS_SRC[$_tr]%%:*}"; _exe="${_SPECS_SRC[$_tr]#*:}"
+        _exedir="$OUT/$_sub/bin"
+        if [ ! -x "$_exedir/$_exe" ]; then
+            echo "  WARNING: native gcc.exe not found for $_tr ($_exedir/$_exe) — skip"
+            continue
         fi
-        rm -f "$_specs_tmp/pkg.zst"
+        cat > "$SPECS_ROOT/bin/${_tr}-gcc" <<WRAP
+#!/bin/sh
+# wine specs-helper for GCC_FOR_TARGET. The native Windows $_exe is the same target as
+# the darwin host gcc, so its -dumpspecs output matches. Used by GCC's all-gcc for two
+# things that otherwise run the unrunnable arm64 host xgcc:
+#   - the \`specs\` pass (-dumpspecs): runs fine under wine.
+#   - the host self-tests (-fself-test): these are MEANINGLESS for a foreign-host cross
+#     build, and the recipe feeds Unix /dev/null which a Windows gcc.exe rejects ("input
+#     file is the same as output file"). So short-circuit any -fself-test invocation to a
+#     no-op (exit 0) — equivalent to the upstream "self-tests are not enabled" result.
+export WINEPREFIX="$SPECS_WINEPREFIX" WINEDEBUG=-all
+export WINEPATH="$_exedir"   # so gcc.exe finds its sibling DLLs + cc1.exe
+for a in "\$@"; do
+    case "\$a" in -fself-test|-fself-test=*) exit 0 ;; esac
+done
+exec wine "$_exedir/$_exe" "\$@"
+WRAP
+        chmod +x "$SPECS_ROOT/bin/${_tr}-gcc"
+        echo "  + ${_tr}-gcc -> wine $_sub/bin/$_exe"
     done
-    echo "  specs-helper drivers under $SPECS_ROOT/bin (NOT on PATH, drivers only)"
+    echo "  wine specs-helpers under $SPECS_ROOT/bin (NOT on PATH)"
 else
-    echo "  WARNING: could not fetch $SPECS_REPO/msys-cross.db — darwin GCC builds will lack a GCC_FOR_TARGET proxy"
+    echo "  wine not installed — skipping specs-helper generation (linux-only build, not needed)"
 fi
-rm -rf "$_specs_tmp"
 
 echo
 echo "=== Bootstrap prefix ready ==="

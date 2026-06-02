@@ -50,26 +50,8 @@ if ! id builduser >/dev/null 2>&1; then
 fi
 echo
 
-# The whole build runs as this one unprivileged user (so the sccache server is
-# single-uid and never hands another uid root-owned objects). runuser scrubs the
-# environment, so forward the bits the build/sccache need explicitly via `env`.
-# Anything writable is chown'd to builduser before use.
-run_as_builduser() {
-    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" 2>/dev/null || true
-    runuser -u builduser -- env \
-        PATH="$PATH" \
-        ZIG_PATH="$ZIG_PATH" \
-        DEPS="$DEPS" DEPS_INSTALL="$DEPS_INSTALL" DEPS_CACHE="$DEPS_CACHE" \
-        BOOTSTRAP_PREFIX="$BOOTSTRAP_PREFIX" INSTALL_PREFIX="$INSTALL_PREFIX" \
-        PKGDEST="$PKGDEST" SRCDEST="$SRCDEST" LOGDEST="$LOGDEST" \
-        ${BUILDDIR:+BUILDDIR="$BUILDDIR"} \
-        ${_MSYS_CROSS_TARGET:+_MSYS_CROSS_TARGET="$_MSYS_CROSS_TARGET"} \
-        JOBS="$JOBS" \
-        SCCACHE_PATH="${SCCACHE_PATH:-}" \
-        SCCACHE_DIR="${SCCACHE_DIR:-}" \
-        SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-}" \
-        "$@"
-}
+# Shared build helpers: run_as_builduser, build_pkg, install_local.
+source "$SCRIPTS_DIR/build-common.sh"
 
 # ---- Step 1: Prepare zig ----
 echo "===== Step 1: Prepare Zig ====="
@@ -87,62 +69,7 @@ echo ""
 echo "===== Step 3: Build static dependencies ====="
 run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
 
-# ---- Helpers for building PKGBUILDs ----
-build_pkg() {
-    local pkg_dir="$1" makepkg_args="${2:--fCd --skippgpcheck}"
-
-    # Set up build directories (needed for --packagelist dry-run and actual build).
-    # Per-target packages (gcc/binutils, selected by _MSYS_CROSS_TARGET) get a
-    # target-suffixed BUILDDIR so the per-target build trees don't collide and the
-    # post-build `rm -rf "$BUILDDIR"` reclaims each target's tree independently.
-    export BUILDDIR="$PROJECT_ROOT/build/$pkg_dir${_MSYS_CROSS_TARGET:+-$_MSYS_CROSS_TARGET}"
-    mkdir -p "$BUILDDIR" "$PKGDEST" "$SRCDEST" "$LOGDEST"
-    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST"
-
-    # Compute expected output packages via makepkg --packagelist (dry-run). Forward
-    # _MSYS_CROSS_TARGET (runuser scrubs env) so the dry-run names match the build.
-    local pkglist
-    pkglist=$(cd "$PROJECT_ROOT/pkgs/$pkg_dir" && runuser -u builduser -- env \
-                ${_MSYS_CROSS_TARGET:+_MSYS_CROSS_TARGET="$_MSYS_CROSS_TARGET"} \
-                makepkg --packagelist 2>/dev/null) || true
-
-    # Skip if all expected packages already exist
-    local all_exist=true
-    if [ -n "$pkglist" ]; then
-        while IFS= read -r p; do
-            [ -f "$p" ] || { all_exist=false; break; }
-        done <<< "$pkglist"
-    else
-        all_exist=false
-    fi
-
-    if $all_exist; then
-        echo ""
-        echo "===== Skipping $pkg_dir (already built) ====="
-        while IFS= read -r f; do echo "  $(basename "$f")"; done <<< "$pkglist"
-        return 0
-    fi
-
-    echo ""
-    echo "===== Building $pkg_dir ====="
-    cd "$PROJECT_ROOT/pkgs/$pkg_dir"
-    run_as_builduser makepkg $makepkg_args
-
-    # Reclaim this package's scratch tree now that its .pkg.tar.* is in PKGDEST.
-    # Each package has an isolated BUILDDIR and no later package reads a prior
-    # one's build tree (outputs live in PKGDEST + INSTALL_PREFIX), so this keeps
-    # peak disk at ~one toolchain build at a time. Skip detection re-derives from
-    # the PKGBUILD + PKGDEST, so removing BUILDDIR doesn't break re-runs.
-    echo "----- Cleaning build dir: $BUILDDIR -----"
-    rm -rf "$BUILDDIR"
-}
-
-install_local() {
-    local pattern="$1"
-    echo "--- Installing $pattern ---"
-    mkdir -p "$INSTALL_PREFIX/var/lib/pacman"
-    pacman -Udd --noconfirm --overwrite='*' --root="$INSTALL_PREFIX" "$PKGDEST"/$pattern 2>&1 | tail -3
-}
+# build_pkg / install_local now live in build-common.sh (sourced above).
 
 # ---- Step 4: Build packages in dependency order ----
 echo ""

@@ -3,5 +3,6 @@
 /deps
 /installer
 /repo
+/repo-darwin
 /build
 /sources

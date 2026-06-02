@@ -213,3 +213,113 @@ jobs:
             --title "$tag" \
             --notes "Automated build from ${GITHUB_SHA}. Consumed by msys-mirror; pin via /archive/${tag}/." \
             --target "${GITHUB_SHA}"
+
+  # ---------------------------------------------------------------------------
+  # Darwin (arm64 macOS host) toolchain — built in PARALLEL with the linux job.
+  # host = aarch64-apple-darwin (arm64 Mach-O), targets mingw32/64/ucrt64/cygwin,
+  # via zig cc on Linux. The GCC Canadian-cross specs pass uses a wine wrapper around
+  # the MSYS2-native gcc.exe in the build sysroot (no dependency on the linux build),
+  # so this job needs no `needs:` and runs concurrently. Output: a SEPARATE pacman repo
+  # repo-darwin/ + its own release tag build-darwin-YYYYMMDD.N. Skipped on PRs.
+  # ---------------------------------------------------------------------------
+  build-darwin:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    container:
+      image: archlinux/archlinux:base-devel
+    timeout-minutes: 180
+
+    steps:
+      - name: Install prerequisites
+        run: pacman -Sy --noconfirm --needed git nodejs github-cli
+
+      - name: Checkout (with MSYS2-packages submodule)
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Mark workspace as safe for git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory '*'
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.10.0"
+      - name: Configure sccache (local disk backend)
+        run: |
+          echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/build/sccache-cache" >> "$GITHUB_ENV"
+          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+          echo "SCCACHE_PATH=${SCCACHE_PATH}" >> "$GITHUB_ENV"
+      # Darwin-specific cache key so the two parallel jobs don't race the same immutable
+      # key. sccache objects are bucketed by SCCACHE_C_CUSTOM_CACHE_BUSTER (=<zigver>:<target>)
+      # anyway, so even a shared cache would be safe; a distinct key just avoids contention.
+      - name: Cache sccache objects (darwin)
+        uses: actions/cache@v5
+        with:
+          path: build/sccache-cache
+          key: sccache-darwin-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-darwin-${{ runner.os }}-${{ github.ref_name }}-
+            sccache-darwin-${{ runner.os }}-
+
+      # Source tarballs (gmp/mpfr/...) are arch-independent — share the deps-src cache
+      # key with the linux job (same build_deps.sh hash).
+      - name: Cache static-dep source tarballs
+        uses: actions/cache@v5
+        with:
+          path: build/.deps-src
+          key: deps-src-${{ runner.os }}-${{ hashFiles('scripts/build_deps.sh') }}
+          restore-keys: |
+            deps-src-${{ runner.os }}-
+
+      - name: Build darwin toolchain repo
+        run: bash scripts/build-darwin.sh
+
+      - name: sccache stats
+        if: always()
+        run: "${SCCACHE_PATH:-sccache} --show-stats || true"
+
+      - name: Summarize darwin repo
+        run: |
+          echo "=== Darwin packages ==="
+          ls -lh repo-darwin/*.pkg.tar.* 2>/dev/null || true
+          echo "=== Darwin database ==="
+          ls -lh repo-darwin/msys-cross-darwin.db* 2>/dev/null || true
+
+      - name: Upload darwin pacman repo
+        uses: actions/upload-artifact@v7
+        with:
+          name: msys-cross-darwin-repo
+          path: |
+            repo-darwin/*.pkg.tar.*
+            repo-darwin/msys-cross-darwin.db*
+            repo-darwin/msys-cross-darwin.files*
+          if-no-files-found: error
+          retention-days: 14
+
+      # Separate release (independent tag space from the linux build-YYYYMMDD.N) so the
+      # mirror can serve an arm64-macOS-host repo under e.g. /darwin/.
+      - name: Publish darwin release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          date_tag="$(date -u +%Y%m%d)"
+          n="$(gh release list --limit 200 --json tagName \
+                 --jq "[.[] | select(.tagName | startswith(\"build-darwin-${date_tag}.\"))] | length" \
+               2>/dev/null || echo 0)"
+          tag="build-darwin-${date_tag}.$((n + 1))"
+          echo "Release tag: $tag"
+          assets=()
+          for f in repo-darwin/*.pkg.tar.* repo-darwin/msys-cross-darwin.db.tar.gz repo-darwin/msys-cross-darwin.files.tar.gz; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          echo "Uploading ${#assets[@]} assets"
+          gh release create "$tag" "${assets[@]}" \
+            --title "$tag" \
+            --notes "Automated darwin (arm64 macOS host) build from ${GITHUB_SHA}." \
+            --target "${GITHUB_SHA}"
