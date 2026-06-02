@@ -97,27 +97,36 @@ build() {
 
     # Rewrite the inherited AUR build():
     #  (1) awk: drop its zstd block (cd zstd .. before cd brotli) and zlib block
-    #      (cd zlib .. before cd openssl) — we supplied those from build_deps above.
-    #      The blocks are delimited by the next dep's `cd "${srcdir}"/<dep>` line, which
-    #      is stable under `declare -f`.
+    #      (cd zlib .. before cd openssl) — we supplied those from build_deps above —
+    #      AND the libseccomp block (cd libseccomp .. before the final `mkdir .../pacman`).
+    #      seccomp is a Linux-only syscall-filter sandbox for pacman's download user; this
+    #      pacman runs UNPRIVILEGED into a user-owned prefix (non-root gate patched out), so
+    #      the sandbox has no value here — and it's unavailable on macOS. Dropping the build
+    #      block means pacman's `file-seccomp` meson feature (auto) finds no libseccomp.pc;
+    #      we also force it off explicitly below. Blocks are delimited by the next stanza's
+    #      `cd "${srcdir}"/<dep>` / `mkdir` line, stable under `declare -f`.
     #  (2) sed: the libarchive CFLAGS fix (re-add -O2 -fno-sanitize=undefined; zig cc
     #      defaults -fsanitize=undefined on, which the bare AUR CFLAGS override would
     #      otherwise leave at -O0 and pull 600+ __ubsan_* into the static link).
+    #  (3) sed: force pacman's seccomp feature off (don't rely on auto-detect).
     eval "$(declare -f _aur_build \
         | awk '
             /cd "\$\{srcdir\}"\/zstd-\$\{_zstdver\}\/lib;/ { skip=1 }
             /cd "\$\{srcdir\}"\/brotli;/                   { skip=0 }
             /cd "\$\{srcdir\}\/"zlib-\$\{_zlibver\};/      { skip=1 }
             /cd "\$\{srcdir\}"\/openssl-\$\{_sslver\};/    { skip=0 }
+            /cd "\$\{srcdir\}\/libseccomp";/               { skip=1 }
+            /mkdir -p "\$\{srcdir\}"\/pacman;/             { skip=0 }
             skip==0 { print }
           ' \
-        | sed 's|CFLAGS="-L${srcdir}/temp/usr/lib"|CFLAGS="-L${srcdir}/temp/usr/lib -O2 -fno-sanitize=undefined"|')"
+        | sed 's|CFLAGS="-L${srcdir}/temp/usr/lib"|CFLAGS="-L${srcdir}/temp/usr/lib -O2 -fno-sanitize=undefined"|' \
+        | sed 's|-Dscriptlet-shell=/usr/bin/bash|-Dscriptlet-shell=/usr/bin/bash -Dfile-seccomp=disabled|')"
 
-    # Guard: if a future AUR bump moves the zstd/zlib `cd` anchors, the awk silently
+    # Guard: if a future AUR bump moves the zstd/zlib/seccomp anchors, the awk silently
     # stops removing them — assert the blocks are actually gone so we fail loudly
     # rather than silently recompiling (or worse, mis-deleting).
-    if declare -f _aur_build | grep -qE 'make libzstd\.a|make libz\.a'; then
-        echo "ERROR: AUR zstd/zlib blocks not neutralized — anchors changed?" >&2
+    if declare -f _aur_build | grep -qE 'make libzstd\.a|make libz\.a|cd "\$\{srcdir\}/libseccomp"'; then
+        echo "ERROR: AUR zstd/zlib/seccomp blocks not neutralized — anchors changed?" >&2
         return 1
     fi
 
