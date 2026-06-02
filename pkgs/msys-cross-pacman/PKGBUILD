@@ -27,12 +27,16 @@ makedepends=('meson' 'cmake' 'gperf' 'git')
 options=('!emptydirs' '!lto' '!strip' '!debug')
 
 # ---- Our additions to source[]: 3 pacman source patches + wrapper/conf ----
+# Two pacman.conf flavours shipped; package() installs the one matching $CARCH:
+# pacman.conf (linux x86_64, [msys-cross]) or pacman-darwin.conf (arm64 macOS host,
+# [msys-cross-darwin] → /repo-darwin, Architecture = arm64).
 source+=("file://$_startdir/0001-nonroot-allow-install.patch"
          "file://$_startdir/0002-no-extract-owner.patch"
          "file://$_startdir/0003-syshookdir-msys-cross.patch"
          "file://$_startdir/msys-pacman"
-         "file://$_startdir/pacman.conf")
-sha512sums+=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+         "file://$_startdir/pacman.conf"
+         "file://$_startdir/pacman-darwin.conf")
+sha512sums+=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # ---- Toolchain: zig cc target gnu.2.11, mostly-static ----
 # Re-export AFTER inherit_aur so we override the AUR's top-level CC=musl-gcc /
@@ -196,5 +200,11 @@ package() {
 
     install -Dm755 "$_pac"                       "$pkgdir/libexec/pacman-static"
     install -Dm755 "$srcdir/msys-pacman"         "$pkgdir/bin/msys-pacman"
-    install -Dm644 "$srcdir/pacman.conf"         "$pkgdir/etc/pacman.d/pacman.conf"
+    # Ship the pacman.conf matching the host arch: arm64 macOS host gets the darwin conf
+    # ([msys-cross-darwin] → /repo-darwin, Architecture = arm64), baked in so the user
+    # never edits it; everything else gets the linux x86_64 conf. CARCH comes from the
+    # makepkg config (makepkg-darwin-arm64.conf sets CARCH=arm64).
+    local _conf="$srcdir/pacman.conf"
+    [ "${CARCH}" = "arm64" ] && _conf="$srcdir/pacman-darwin.conf"
+    install -Dm644 "$_conf"                      "$pkgdir/etc/pacman.d/pacman.conf"
 }
