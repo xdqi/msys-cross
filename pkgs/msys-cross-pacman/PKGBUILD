@@ -107,6 +107,14 @@ build() {
     #      * zstd + brotli + zlib (one run: `cd zstd` .. `cd openssl`) — zstd/zlib come
     #        from build_deps (seeded above); brotli is dropped outright (see below).
     #      * nghttp2 (`cd nghttp2` .. `cd curl`) — curl's http2.
+    #      * libgpg-error + libassuan + gpgme (`cd libgpg-error` .. `cd libseccomp`) — the
+    #        GPG stack, used ONLY for package-signature verification. Every repo this pacman
+    #        ships (linux + darwin, pacman.conf + pacman-darwin.conf) sets SigLevel = Never,
+    #        so gpgme is never exercised; we disable it (-Dgpgme=disabled below) and skip
+    #        building all three. On the macOS host these three were also the source of a
+    #        zig-Mach-O-linker duplicate-symbol error (___sputc, a <stdio.h> inline emitted
+    #        as a non-coalescable weak def) at the final pacman link — dropping them removes
+    #        that too.
     #      * libseccomp (`cd libseccomp` .. `mkdir .../pacman`) — Linux-only syscall
     #        sandbox for pacman's download user; this pacman runs UNPRIVILEGED into a
     #        user-owned prefix (non-root gate patched out), so it has no value, and it's
@@ -118,27 +126,29 @@ build() {
     #      at -O0 and pull 600+ __ubsan_* into the static link).
     #  (3) sed — drop brotli from BOTH openssl (the curl-static patch links brotli into
     #      openssl) and curl configure, and tell curl --without-nghttp2; force pacman's
-    #      file-seccomp meson feature off (don't rely on auto-detect).
+    #      file-seccomp AND gpgme meson features off (don't rely on auto-detect, which would
+    #      otherwise pick up the host's libseccomp/gpgme .pc on the Arch builder).
     eval "$(declare -f _aur_build \
         | awk '
             /cd "\$\{srcdir\}"\/zstd-\$\{_zstdver\}\/lib;/ { skip=1 }   # zstd+brotli+zlib run
             /cd "\$\{srcdir\}"\/openssl-\$\{_sslver\};/    { skip=0 }   # ends at openssl build
             /cd "\$\{srcdir\}"\/nghttp2-\$\{_nghttp2_ver\};/ { skip=1 } # nghttp2 (curl http2)
             /cd "\$\{srcdir\}"\/curl-\$\{_curlver\};/      { skip=0 }
-            /cd "\$\{srcdir\}\/libseccomp";/               { skip=1 } # seccomp sandbox
+            /cd "\$\{srcdir\}"\/libgpg-error-\$\{_gpgerrorver\};/ { skip=1 } # gpg-error+assuan+gpgme
+            /cd "\$\{srcdir\}\/libseccomp";/               { skip=1 } # seccomp sandbox (and ends gpg run)
             /mkdir -p "\$\{srcdir\}"\/pacman;/             { skip=0 }
             skip==0 { print }
           ' \
         | sed 's|CFLAGS="-L${srcdir}/temp/usr/lib"|CFLAGS="-L${srcdir}/temp/usr/lib -O2 -fno-sanitize=undefined"|' \
         | sed -E 's@[[:space:]]*--with-brotli-(include|lib)="\$\{srcdir\}"/temp/usr/(include|lib)@@g' \
         | sed -E 's@ enable-brotli @ @; s@ --with-brotli @ --without-nghttp2 @' \
-        | sed 's|-Dscriptlet-shell=/usr/bin/bash|-Dscriptlet-shell=/bin/bash -Dfile-seccomp=disabled|')"
+        | sed 's|-Dscriptlet-shell=/usr/bin/bash|-Dscriptlet-shell=/bin/bash -Dfile-seccomp=disabled -Dgpgme=disabled|')"
 
     # Guard: if a future AUR bump moves the anchors, the awk silently stops removing the
     # blocks — assert each is actually gone so we fail loudly rather than silently
-    # recompiling (or linking brotli/nghttp2/seccomp back in).
-    if declare -f _aur_build | grep -qE 'make libzstd\.a|make libz\.a|cd "\$\{srcdir\}/libseccomp"|cd "\$\{srcdir\}"/brotli|cd "\$\{srcdir\}"/nghttp2|enable-brotli|--with-brotli'; then
-        echo "ERROR: AUR zstd/zlib/brotli/nghttp2/seccomp blocks not neutralized — anchors changed?" >&2
+    # recompiling (or linking brotli/nghttp2/seccomp/gpgme back in).
+    if declare -f _aur_build | grep -qE 'make libzstd\.a|make libz\.a|cd "\$\{srcdir\}/libseccomp"|cd "\$\{srcdir\}"/brotli|cd "\$\{srcdir\}"/nghttp2|cd "\$\{srcdir\}"/libgpg-error-|cd "\$\{srcdir\}"/libassuan-|cd "\$\{srcdir\}"/gpgme-|enable-brotli|--with-brotli'; then
+        echo "ERROR: AUR zstd/zlib/brotli/nghttp2/seccomp/gpgme blocks not neutralized — anchors changed?" >&2
         return 1
     fi
 
@@ -150,6 +160,23 @@ build() {
     # so no configure-line surgery is needed for them. (AR=zig ar --format=darwin is handled
     # in setup_zig_env.)
     if [ "${CARCH}" = "arm64" ]; then
+        # Put EVERY autoconf configure in _aur_build (xz, bzip2, openssl, libarchive, curl)
+        # into cross mode in one shot: autoconf reads build_alias/host_alias from the env as
+        # the equivalent of --build/--host. Without this each dep's bare `./configure` (the
+        # AUR's native-build form) tries to RUN an arm64 conftest on the Linux builder and
+        # dies ("cannot run C compiled programs, use --host"). host != build → cross_compiling=yes.
+        export build_alias=x86_64-pc-linux-gnu host_alias=aarch64-apple-darwin20
+        # Confine pkg-config to OUR prefixes (temp/usr where the deps install + the stolen
+        # $_deps), REPLACING the system search base via PKG_CONFIG_LIBDIR (PKG_CONFIG_PATH
+        # only PREPENDS, leaving the host's .pc visible). Without this, pacman's meson does
+        # dependency('libseccomp') with auto-detect and FINDS the Arch builder's host
+        # libseccomp.pc → sets HAVE_LIBSECCOMP → lib/libalpm/sandbox_syscalls.c #includes
+        # <seccomp.h>, absent for the macOS target. There is no -D to turn that probe off
+        # (it is hardwired auto, separate from the -Dfile-seccomp we already disable), so
+        # the only lever is to make pkg-config not see the host lib. All real deps
+        # (openssl/curl/archive/gpgme/zlib/zstd) live under these two prefixes, so nothing
+        # else regresses; this is also simply the correct hygiene for a cross build.
+        export PKG_CONFIG_LIBDIR="${srcdir}/temp/usr/lib/pkgconfig:$_deps/lib/pkgconfig"
         # libarchive: its autoconf link-tests for these wchar funcs misfire under zig+darwin
         # (macOS HAS them), so it would declare static fallbacks that clash with the SDK's
         # non-static decls. Tell configure they exist.
@@ -161,16 +188,60 @@ build() {
         export ac_cv_header_membership_h=no ac_cv_func_mbr_uid_to_uuid=no \
                ac_cv_func_mbr_uuid_to_id=no ac_cv_have_decl_ACL_TYPE_EXTENDED=no \
                ac_cv_have_decl_ACL_TYPE_NFS4=no
+        # libarchive_fe (its always-built noinst convenience lib): passphrase.c is broken
+        # for "function present, header absent" — macOS libSystem HAS readpassphrase() so
+        # configure sets HAVE_READPASSPHRASE=1, but zig's SDK ships no <readpassphrase.h> so
+        # HAVE_READPASSPHRASE_H is unset → neither the system prototype nor the bundled
+        # fallback (guarded by #ifndef HAVE_READPASSPHRASE) is compiled, leaving the call
+        # undeclared and RPP_ECHO_OFF undefined. Force the func "absent" so libarchive uses
+        # its own bundled OpenBSD readpassphrase.c + RPP_* macros (the Linux path). pacman
+        # never prompts for a passphrase in our flow; the bundled impl is correct regardless.
+        export ac_cv_func_readpassphrase=no
         # curl: macOS pthread is in libSystem, not -lpthread (autoconf misses it).
         export ac_cv_func_pthread_create=yes
-        # Two configure-line edits (not cache vars):
+        # pacman itself is built with meson, which — unlike autoconf — does NOT honour
+        # build_alias/host_alias; left to itself it compiles an arm64 Mach-O sanity-check
+        # exe and tries to RUN it on the Linux builder ("binary or interpreter not
+        # executable. Possibly wrong architecture"). A meson cross file declares the host
+        # machine + the zig wrapper toolchain so meson knows it's cross-compiling and skips
+        # running built executables. The compilers/ar are exactly what setup_zig_env exports
+        # (CC/CXX wrappers under scripts/, AR=zig ar --format=darwin for Mach-O archives).
+        # We also pass -Di18n=false to the pacman meson run: i18n=true pulls dependency('intl')
+        # (libintl), which on macOS is a separate gettext lib zig's SDK does not ship (on
+        # Linux it's builtin to glibc). A bootstrap pacman needs no message translation.
+        _meson_cross="${srcdir}/meson-cross-darwin.txt"
+        cat > "$_meson_cross" <<EOF
+[binaries]
+c = '${CC}'
+cpp = '${CXX}'
+ar = ['zig', 'ar', '--format=darwin']
+strip = ['zig', 'strip']
+ranlib = ['zig', 'ranlib']
+pkg-config = 'pkg-config'
+
+[host_machine]
+system = 'darwin'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+EOF
+        # Two configure-line edits (not cache vars) + the meson cross/i18n injection:
         #  - openssl's CARCH case has no arm64 arm → add the darwin64-arm64-cc target.
-        #  - curl: --disable-ipv6 (drops curl's macos.c, which would pull the
-        #    SystemConfiguration framework zig's SDK lacks; macOS still resolves via the
-        #    standard getaddrinfo — only the system DNS/proxy-pref read is skipped).
+        #  - curl: turn IPV6 OFF by editing the AUR's own --enable-{ipv6,threaded-resolver}
+        #    brace expansion → --enable-threaded-resolver --disable-ipv6. (Just APPENDING
+        #    --disable-ipv6 elsewhere on the line does NOT work: curl 8.20's configure lets
+        #    the earlier --enable-ipv6 win, leaving USE_IPV6 defined.) With USE_IPV6 unset,
+        #    curl_setup.h no longer defines CURL_MACOS_CALL_COPYPROXIES, so macos.c — which
+        #    #includes <SystemConfiguration/...> that zig's macOS SDK lacks — is excluded.
+        #    macOS still resolves hosts via getaddrinfo; only the system DNS/proxy-pref read
+        #    (a SCDynamicStore call) is skipped, irrelevant to a plain https GET.
+        #  - pacman meson: --cross-file (so meson cross-compiles, see above) + -Di18n=false
+        #    (no libintl on macOS, see above). -Dgpgme/-Dfile-seccomp are already disabled by
+        #    the full-platform sed; the gpg/seccomp dep blocks are dropped by the awk above.
         eval "$(declare -f _aur_build \
             | sed 's@\([[:space:]]*\)x86_64)@\1arm64)\n\1    openssltarget=darwin64-arm64-cc\n\1    optflags=;;\n\1x86_64)@' \
-            | sed 's@--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt @--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --disable-ipv6 @')"
+            | sed 's@--enable-{ipv6,threaded-resolver}@--enable-threaded-resolver --disable-ipv6@' \
+            | sed "s@meson --prefix=/usr@meson --cross-file $_meson_cross -Di18n=false --prefix=/usr@")"
     fi
 
     _aur_build

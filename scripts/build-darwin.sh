@@ -79,10 +79,16 @@ bash "$SCRIPTS_DIR/prepare-build-sysroot.sh"
 # The wineprefix under specs-helper/ is created as root here; chown so builduser can use it.
 chown -R builduser:builduser "$BOOTSTRAP_PREFIX/specs-helper" 2>/dev/null || true
 
-# ---- Step 3: arm64 static deps (gmp/mpfr/mpc/isl/zlib/zstd as Mach-O .a) ----
+# ---- Step 3: arm64 static deps — STOLEN from Homebrew bottles, not cross-built ----
+# gmp/mpfr/mpc/isl don't cross-compile cleanly on zig's macOS SDK (asm/configure host
+# probes); Homebrew already ships correct arm64 Mach-O .a, so build-deps-darwin.sh fetches
+# those (+ zlib/zstd) into deps/install-$ZIG_TARGET with the same layout build_deps.sh
+# produces (.a + headers + .pc + .so->.a symlinks). Runs as root here (just curl+bsdtar);
+# chown after so builduser can read them.
 echo ""
-echo "===== Step 3: Build static dependencies (arm64 Mach-O) ====="
-run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
+echo "===== Step 3: Provision static dependencies (Homebrew arm64 bottles) ====="
+bash "$SCRIPTS_DIR/build-deps-darwin.sh"
+chown -R builduser:builduser "$DEPS_INSTALL" 2>/dev/null || true
 
 # ---- Step 4: build packages (foundation, then binutils, then gcc) ----
 echo ""
