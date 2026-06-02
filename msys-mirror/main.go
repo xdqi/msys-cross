@@ -10,13 +10,21 @@
 // transparently redirected here to GitHub's CDN.
 //
 // Routes:
-//   /repo/                      -> listing of the latest release
-//   /repo/<file>                -> 302 to latest release asset <file>
+//   /repo/                      -> listing of the latest LINUX release
+//   /repo/<file>                -> 302 to latest linux release asset <file>
+//   /repo-darwin/               -> listing of the latest DARWIN release
+//   /repo-darwin/<file>         -> 302 to latest darwin release asset <file>
 //   /archive/<tag>/             -> listing of release <tag>
 //   /archive/<tag>/<file>       -> 302 to release <tag> asset <file>
 //   /healthz                    -> 200 ok
 //
-// "latest" follows GitHub's releases/latest. Tags are date.seq, e.g. 20260531.1.
+// There are two independent rolling repos: the linux x86_64 cross-toolchain
+// (tags build-YYYYMMDD.N) and the arm64-macOS-host toolchain (tags
+// build-darwin-YYYYMMDD.N). Because GitHub's releases/latest would alternate
+// between them as each is published, "latest" here is computed by listing
+// releases and picking the newest tag matching a prefix: /repo/ takes the newest
+// build- tag that is NOT build-darwin-, and /repo-darwin/ takes the newest
+// build-darwin- tag.
 //
 // The pacman db is published as msys-cross.db.tar.gz (asset names can't be
 // symlinks), but pacman requests msys-cross.db; this service aliases the
@@ -151,14 +159,6 @@ func githubGET(apiPath string) ([]byte, error) {
 }
 
 // ---- Release lookups ----
-func latestRelease() (*release, error) {
-	var r release
-	if err := c.fetchJSON(fmt.Sprintf("/repos/%s/%s/releases/latest", owner, repo), &r); err != nil {
-		return nil, err
-	}
-	return &r, nil
-}
-
 func releaseByTag(tag string) (*release, error) {
 	var r release
 	if err := c.fetchJSON(fmt.Sprintf("/repos/%s/%s/releases/tags/%s", owner, repo, tag), &r); err != nil {
@@ -175,6 +175,39 @@ func listReleases() ([]release, error) {
 		return nil, err
 	}
 	return rs, nil
+}
+
+// latestByPrefix returns the newest (by published_at) non-draft, non-prerelease
+// release whose tag starts with want and — if exclude is non-empty — does NOT start
+// with exclude. This separates the two rolling repos that share one releases list:
+// linux  -> latestByPrefix("build-", "build-darwin-")
+// darwin -> latestByPrefix("build-darwin-", "")
+// GitHub's releases/latest can't do this (it would alternate between the two).
+func latestByPrefix(want, exclude string) (*release, error) {
+	rs, err := listReleases()
+	if err != nil {
+		return nil, err
+	}
+	var best *release
+	for i := range rs {
+		r := &rs[i]
+		if r.Draft || r.Prerelease {
+			continue
+		}
+		if !strings.HasPrefix(r.TagName, want) {
+			continue
+		}
+		if exclude != "" && strings.HasPrefix(r.TagName, exclude) {
+			continue
+		}
+		if best == nil || r.Published.After(best.Published) {
+			best = r
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("no release matching prefix %q", want)
+	}
+	return best, nil
 }
 
 // ---- Asset name resolution ----
@@ -233,6 +266,7 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("/repo/", handleRepo)
+	mux.HandleFunc("/repo-darwin/", handleRepoDarwin)
 	mux.HandleFunc("/archive/", handleArchive)
 	mux.HandleFunc("/archive", handleArchive)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -252,15 +286,28 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-// /repo/ and /repo/<file> — the rolling "latest" view.
+// /repo/ and /repo/<file> — the rolling latest LINUX release (newest build- tag
+// that is not a build-darwin- tag).
 func handleRepo(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/repo/")
-	rel, err := latestRelease()
+	rel, err := latestByPrefix("build-", "build-darwin-")
 	if err != nil {
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	serveReleasePath(w, r, rel, "/repo", rest)
+}
+
+// /repo-darwin/ and /repo-darwin/<file> — the rolling latest DARWIN release
+// (arm64 macOS host; newest build-darwin- tag).
+func handleRepoDarwin(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/repo-darwin/")
+	rel, err := latestByPrefix("build-darwin-", "")
+	if err != nil {
+		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	serveReleasePath(w, r, rel, "/repo-darwin", rest)
 }
 
 // /archive            -> list of all snapshot tags
@@ -320,8 +367,9 @@ func link(w http.ResponseWriter, href, name, trailing string) {
 // plus the GitHub link in the header.
 func listRoot(w http.ResponseWriter) {
 	pageHeader(w, "Index of /")
-	link(w, "/repo/", "repo/", "rolling latest release")
-	link(w, "/archive/", "archive/", "pinned snapshots (build-YYYYMMDD.N)")
+	link(w, "/repo/", "repo/", "rolling latest linux release (build-YYYYMMDD.N)")
+	link(w, "/repo-darwin/", "repo-darwin/", "rolling latest arm64-macOS-host release (build-darwin-YYYYMMDD.N)")
+	link(w, "/archive/", "archive/", "pinned snapshots (any tag)")
 	pageFooter(w)
 }
 

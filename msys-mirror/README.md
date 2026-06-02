@@ -22,15 +22,20 @@ each package by name. Both are transparently redirected to GitHub's CDN.
 
 | Path | Behaviour |
 |------|-----------|
-| `/repo/` | HTML listing of the **latest** release (GitHub `releases/latest`) |
-| `/repo/<file>` | 302 to the latest release's asset `<file>` |
-| `/archive/<tag>/` | HTML listing of release `<tag>` (e.g. `build-20260531.1`) |
+| `/repo/` | HTML listing of the latest **linux** release (newest `build-` tag, not `build-darwin-`) |
+| `/repo/<file>` | 302 to the latest linux release's asset `<file>` |
+| `/repo-darwin/` | HTML listing of the latest **arm64-macOS-host** release (newest `build-darwin-` tag) |
+| `/repo-darwin/<file>` | 302 to the latest darwin release's asset `<file>` |
+| `/archive/<tag>/` | HTML listing of release `<tag>` (e.g. `build-20260531.1`, `build-darwin-20260531.1`) |
 | `/archive/<tag>/<file>` | 302 to release `<tag>`'s asset `<file>` |
 | `/healthz` | `200 ok` |
 
-`<tag>` is `build-YYYYMMDD.N`, e.g. `build-20260531.1`, `build-20260531.2` — each
-tag is an immutable snapshot, so `/archive/<tag>/` is a self-contained repo
-archive. (The service treats `<tag>` opaquely; any tag scheme works.)
+There are two independent rolling repos sharing one GitHub releases list: the
+linux x86_64 cross-toolchain (tags `build-YYYYMMDD.N`) and the arm64-macOS-host
+toolchain (tags `build-darwin-YYYYMMDD.N`). Since GitHub's `releases/latest` would
+alternate between them, each rolling view picks the newest release matching its tag
+prefix. Tags are immutable snapshots, so `/archive/<tag>/` is a self-contained repo
+archive for either flavour.
 
 ### Name resolution
 
@@ -42,16 +47,28 @@ archive. (The service treats `<tag>` opaquely; any tag scheme works.)
 
 ## pacman client config
 
+Linux x86_64 host (the cross-toolchain that runs on a Linux box):
+
 ```ini
 [msys-cross]
 Server = https://msys.kosaka.moe/repo
 SigLevel = Never
 ```
 
-Pin a snapshot instead:
+arm64 macOS host (the toolchain that runs on Apple Silicon — use the Mac's pacman,
+`Architecture = arm64`):
+
+```ini
+[msys-cross-darwin]
+Server = https://msys.kosaka.moe/repo-darwin
+SigLevel = Never
+```
+
+Pin a snapshot instead (either flavour):
 
 ```ini
 Server = https://msys.kosaka.moe/archive/build-20260531.1
+Server = https://msys.kosaka.moe/archive/build-darwin-20260531.1
 ```
 
 ## Configuration (env)
