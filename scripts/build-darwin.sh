@@ -84,9 +84,23 @@ echo ""
 echo "===== Step 3: Build static dependencies (arm64 Mach-O) ====="
 run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
 
-# ---- Step 4: build packages (binutils then gcc) per target ----
+# ---- Step 4: build packages (foundation, then binutils, then gcc) ----
 echo ""
 echo "===== Step 4: Build darwin packages ====="
+
+# Foundation: filesystem, ca-certificates, pacman (cross-built for arm64 macOS — its deps
+# openssl/libarchive/curl cross via the CARCH=arm64 overrides in the PKGBUILD), pkgconfig.
+# These are the host tools the darwin bootstrap ships. install_local makes the just-built
+# arm64 packages available in INSTALL_PREFIX for later steps (as the linux build does).
+build_pkg "msys-cross-filesystem"      "-fCd --skippgpcheck --nocheck --ignorearch"
+build_pkg "msys-cross-ca-certificates" "-fCd --skippgpcheck --nocheck --ignorearch"
+build_pkg "msys-cross-pacman"          "-fCd --skippgpcheck --nocheck --ignorearch"
+install_local "msys-cross-filesystem-*.pkg.tar.*"
+install_local "msys-cross-ca-certificates-*.pkg.tar.*"
+install_local "msys-cross-pacman-*.pkg.tar.*"
+build_pkg "msys-cross-pkgconfig"       "-fCd --skippgpcheck --nocheck --ignorearch"
+install_local "msys-cross-pkgconfig-*.pkg.tar.*"
+
 # binutils handles all four targets via _MSYS_CROSS_TARGET (incl. cygwin). It needs no
 # specs-helper. Order it before gcc (mirrors the linux build).
 for _t in mingw64 mingw32 ucrt64 cygwin; do
@@ -118,8 +132,22 @@ for pkg in "$PKGDEST"/*.pkg.tar.*; do
 done
 shopt -u nullglob
 
+# ---- Step 6: darwin bootstrap tarball ----
+# Same as the linux build's installer step, but with the darwin pacman.conf
+# (Architecture=arm64, [msys-cross-darwin] → /repo-darwin) baked into the tree, and a
+# darwin-specific output name. The user's single download: extract → a working arm64-macOS
+# pacman + the toolchain, no hand-edited config. Uses the darwin foundation packages just
+# built into repo-darwin/.
+echo ""
+echo "===== Step 6: Darwin bootstrap ====="
+export INSTALLER_DIR="${INSTALLER_DIR:-$PROJECT_ROOT/installer-darwin}"
+export PACMAN_CONF="$SCRIPTS_DIR/../pkgs/msys-cross-pacman/pacman-darwin.conf"
+export BOOTSTRAP_TARBALL="${BOOTSTRAP_TARBALL:-$PKGDEST/bootstrap-darwin.tar.xz}"
+bash "$SCRIPTS_DIR/build_installer.sh"
+
 echo ""
 echo "===== Darwin build complete ====="
 echo "Repo: $PKGDEST"
 ls "$PKGDEST"/*.pkg.tar.* 2>/dev/null | while read -r f; do echo "  $(basename "$f")"; done
+ls "$PKGDEST"/bootstrap-darwin.tar.xz 2>/dev/null
 df -h "$PROJECT_ROOT" | tail -1

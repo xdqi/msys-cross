@@ -14,8 +14,9 @@ rm -rf "$INSTALLER_DIR"
 mkdir -p "$INSTALLER_DIR/var/lib/pacman"
 
 # --config: pacman with --root looks for $root/etc/pacman.conf which doesn't
-# exist yet. Point to the pacman.conf from the msys-cross-pacman source dir.
-PACMAN_CONF="$PROJECT_ROOT/pkgs/msys-cross-pacman/pacman.conf"
+# exist yet. Point to the pacman.conf from the msys-cross-pacman source dir. Overridable
+# via PACMAN_CONF so the darwin build can pass pacman-darwin.conf (arm64 / repo-darwin).
+PACMAN_CONF="${PACMAN_CONF:-$PROJECT_ROOT/pkgs/msys-cross-pacman/pacman.conf}"
 pacman -Udd --noconfirm --root="$INSTALLER_DIR" --config "$PACMAN_CONF" \
     "$PKGDEST"/msys-cross-filesystem-*.pkg.tar.* \
     "$PKGDEST"/msys-cross-ca-certificates-*.pkg.tar.* \

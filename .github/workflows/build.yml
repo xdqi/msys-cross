@@ -296,6 +296,7 @@ jobs:
             repo-darwin/*.pkg.tar.*
             repo-darwin/msys-cross-darwin.db*
             repo-darwin/msys-cross-darwin.files*
+            repo-darwin/bootstrap-darwin.tar.xz
           if-no-files-found: error
           retention-days: 14
 
@@ -315,7 +316,7 @@ jobs:
           tag="build-darwin-${date_tag}.$((n + 1))"
           echo "Release tag: $tag"
           assets=()
-          for f in repo-darwin/*.pkg.tar.* repo-darwin/msys-cross-darwin.db.tar.gz repo-darwin/msys-cross-darwin.files.tar.gz; do
+          for f in repo-darwin/*.pkg.tar.* repo-darwin/msys-cross-darwin.db.tar.gz repo-darwin/msys-cross-darwin.files.tar.gz repo-darwin/bootstrap-darwin.tar.xz; do
             [ -f "$f" ] && assets+=("$f")
           done
           echo "Uploading ${#assets[@]} assets"
