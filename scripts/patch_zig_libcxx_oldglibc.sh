@@ -43,7 +43,7 @@ echo "patch_zig_libcxx_oldglibc: era=$ERA prefix=$ZIG_PREFIX"
 apply_one() {
     local pf="$PATCH_DIR/$1" out rc
     [ -f "$pf" ] || die "missing patch file: $pf"
-    out="$(patch -N -p1 --fuzz=3 -d "$LIBCXX" < "$pf" 2>&1)" && rc=0 || rc=$?
+    out="$(patch -N -b --suffix=.anyfsbak -p1 --fuzz=3 -d "$LIBCXX" < "$pf" 2>&1)" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "patch_zig_libcxx_oldglibc: applied $1"
     elif printf '%s\n' "$out" | grep -qiE 'previously applied|Reversed'; then
@@ -55,4 +55,47 @@ apply_one() {
 }
 for p in "${PATCHES[@]}"; do apply_one "$p"; done
 
-# (Task 3 appends self-verify below.)
+# ---- self-verify (backstop against a fuzzed mis-apply) ----
+PROBE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PROBE_DIR"' EXIT
+cat > "$PROBE_DIR/anew.cpp" <<'EOF'
+#include <new>
+#include <cstdint>
+struct alignas(64) Big { char x[64]; };
+int main() { Big* p = new Big(); int r = (int)((uintptr_t)p & 63); delete p; return r; }
+EOF
+export ZIG_GLOBAL_CACHE_DIR="$PROBE_DIR/zc"   # isolated cache -> real libc++ recompile
+
+# Restore originals from our deterministic .anyfsbak backups, then remove any .rej.
+restore_backups() {
+    find "$LIBCXX" -name '*.anyfsbak' -print0 | while IFS= read -r -d '' b; do
+        mv -f "$b" "${b%.anyfsbak}"
+    done
+    find "$LIBCXX" -name '*.rej' -delete
+}
+
+verify_target() {  # <triple> <want-symbol> <forbid-symbol>
+    local triple="$1" want="$2" forbid="$3" out="$PROBE_DIR/probe.bin" syms
+    if ! "$ZIG_BIN" c++ -target "$triple" -std=c++17 "$PROBE_DIR/anew.cpp" -o "$out" 2>"$PROBE_DIR/err"; then
+        echo "  verify FAIL: $triple did not link" >&2
+        grep -oE 'undefined symbol:[^>]*' "$PROBE_DIR/err" | sort -u >&2
+        return 1
+    fi
+    syms="$(objdump -T "$out" 2>/dev/null | grep -oE 'aligned_alloc|posix_memalign' | sort -u | tr '\n' ',')"
+    if [ -n "$want" ]   && ! printf '%s' "$syms" | grep -q "$want";   then echo "  verify FAIL: $triple missing $want (got [$syms])" >&2; return 1; fi
+    if [ -n "$forbid" ] &&   printf '%s' "$syms" | grep -q "$forbid"; then echo "  verify FAIL: $triple uses forbidden $forbid (got [$syms])" >&2; return 1; fi
+    echo "  verify OK: $triple -> [$syms]"
+}
+
+VERIFY_OK=1
+verify_target x86_64-linux-gnu.2.11 posix_memalign aligned_alloc || VERIFY_OK=0
+verify_target x86_64-linux-gnu.2.17 aligned_alloc ""             || VERIFY_OK=0
+
+if [ "$VERIFY_OK" -ne 1 ]; then
+    restore_backups
+    die "self-verify failed; libc++ restored from backups"
+fi
+
+# success: drop our backups and any stray .rej (e.g. from an idempotent re-run)
+find "$LIBCXX" \( -name '*.anyfsbak' -o -name '*.rej' \) -delete
+echo "patch_zig_libcxx_oldglibc: OK (era=$ERA)"
