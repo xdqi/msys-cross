@@ -525,8 +525,13 @@ EOF
             check x86_64-linux-gnu.2.17 aligned_alloc ""
             check aarch64-linux-gnu.2.17 aligned_alloc ""   # aarch64 no-op (glibc floor 2.17)
             echo "-- idempotency: re-run is a no-op --"
-            bash /work/scripts/patch_zig_libcxx_oldglibc.sh "$d" | grep -q "already applied" \
-                && echo "  OK idempotent" || { echo "  FAIL not idempotent"; exit 1; }
+            # Capture stdout fully before grepping: piping straight into `grep -q`
+            # lets grep close the pipe on first match, which SIGPIPEs the still-running
+            # patch script (self-verify keeps writing) -> exit 141 -> pipefail mis-reports
+            # a working idempotent re-run as a failure.
+            rerun_out="$(bash /work/scripts/patch_zig_libcxx_oldglibc.sh "$d")"
+            echo "$rerun_out" | grep -q "already applied" \
+                && echo "  OK idempotent" || { echo "  FAIL not idempotent"; echo "$rerun_out"; exit 1; }
         done
         echo "ALL ZIG OLD-GLIBC PATCH TESTS PASSED"
     '
