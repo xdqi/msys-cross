@@ -60,7 +60,7 @@ export ZIG_TARGET="x86_64-linux-gnu.2.11"
 export _MSYS_CROSS_HOST="x86_64-linux-gnu"
 export _MSYS_CROSS_BUILD="x86_64-linux-gnu"
 # _MSYS_CROSS_DUMPSPECS intentionally UNSET on linux (native xgcc runs directly).
-export _MSYS_CROSS_ENV_LOADED=1   # guard marker — see §5
+export MSYS_CROSS_ENV_LOADED=1   # guard marker — see §5
 ```
 
 `scripts/env-darwin.sh`:
@@ -69,11 +69,17 @@ export ZIG_TARGET="aarch64-macos.11.0"
 export _MSYS_CROSS_HOST="aarch64-apple-darwin20"
 # _MSYS_CROSS_BUILD stays unset -> build machine is Linux (cross mode).
 export _MSYS_CROSS_DUMPSPECS=1
-export _MSYS_CROSS_ENV_LOADED=1   # guard marker — see §5
+export MSYS_CROSS_ENV_LOADED=1   # guard marker (no leading _ — see naming spec)
 ```
 
+> Naming note: the existing cross vars carry a leading underscore (`_MSYS_CROSS_*`);
+> a later, final-phase change (`2026-06-03-cross-var-rename-design.md`) drops that
+> prefix family-wide. The NEW marker is introduced already-bare
+> (`MSYS_CROSS_ENV_LOADED`) so the rename sweep doesn't have to touch it. The
+> `_MSYS_CROSS_HOST/BUILD/DUMPSPECS` shown here keep the leading `_` until that sweep.
+
 These files are pure `export` statements — safe to `source` from any bash shell and
-from inside makepkg. The `_MSYS_CROSS_ENV_LOADED=1` marker lets consumers assert the
+from inside makepkg. The `MSYS_CROSS_ENV_LOADED=1` marker lets consumers assert the
 env was sourced (§5); verified in the arch container to survive both `runuser` and the
 makepkg `--config` boundary into `build()`.
 
@@ -139,10 +145,10 @@ fallback** (layer C) so a bare `CC=scripts/zigcc` still works standalone.
 **Guard mechanism — marker var, not per-var check.** The required-var *set differs by
 target* (`_MSYS_CROSS_BUILD` only on linux, `_MSYS_CROSS_DUMPSPECS` only on darwin), so
 "every var must be set" would wrongly fail. Instead env-`<target>`.sh exports a single
-`_MSYS_CROSS_ENV_LOADED=1` marker; consumers assert the marker (proving the env was
+`MSYS_CROSS_ENV_LOADED=1` marker; consumers assert the marker (proving the env was
 sourced) and then read each var **without** a `:-default`:
 ```sh
-[ "${_MSYS_CROSS_ENV_LOADED:-}" = 1 ] || {
+[ "${MSYS_CROSS_ENV_LOADED:-}" = 1 ] || {
     echo "ERROR: source scripts/env-<target>.sh (or build via build.sh) first" >&2
     exit 1
 }
