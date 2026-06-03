@@ -39,6 +39,14 @@ else
 fi
 echo "patch_zig_libcxx_oldglibc: era=$ERA prefix=$ZIG_PREFIX"
 
+# Restore originals from our deterministic .anyfsbak backups, then remove any .rej.
+restore_backups() {
+    find "$LIBCXX" -name '*.anyfsbak' -print0 | while IFS= read -r -d '' b; do
+        mv -f "$b" "${b%.anyfsbak}"
+    done
+    find "$LIBCXX" -name '*.rej' -delete
+}
+
 # ---- apply ----
 apply_one() {
     local pf="$PATCH_DIR/$1" out rc
@@ -50,13 +58,14 @@ apply_one() {
         echo "patch_zig_libcxx_oldglibc: $1 already applied (skipping)"
     else
         printf '%s\n' "$out" >&2
-        die "failed to apply $1 (see .rej under $LIBCXX)"
+        restore_backups
+        die "failed to apply $1; libc++ restored from backups (see error above)"
     fi
 }
 for p in "${PATCHES[@]}"; do apply_one "$p"; done
 
 # ---- self-verify (backstop against a fuzzed mis-apply) ----
-PROBE_DIR="$(mktemp -d)"
+PROBE_DIR="$(mktemp -d "${TMPDIR:-$(dirname "$ZIG_PREFIX")}/zigpatch.XXXXXX")"
 trap 'rm -rf "$PROBE_DIR"' EXIT
 cat > "$PROBE_DIR/anew.cpp" <<'EOF'
 #include <new>
@@ -65,14 +74,6 @@ struct alignas(64) Big { char x[64]; };
 int main() { Big* p = new Big(); int r = (int)((uintptr_t)p & 63); delete p; return r; }
 EOF
 export ZIG_GLOBAL_CACHE_DIR="$PROBE_DIR/zc"   # isolated cache -> real libc++ recompile
-
-# Restore originals from our deterministic .anyfsbak backups, then remove any .rej.
-restore_backups() {
-    find "$LIBCXX" -name '*.anyfsbak' -print0 | while IFS= read -r -d '' b; do
-        mv -f "$b" "${b%.anyfsbak}"
-    done
-    find "$LIBCXX" -name '*.rej' -delete
-}
 
 verify_target() {  # <triple> <want-symbol> <forbid-symbol>
     local triple="$1" want="$2" forbid="$3" out="$PROBE_DIR/probe.bin" syms
