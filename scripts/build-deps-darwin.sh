@@ -100,14 +100,19 @@ for lib in gmp mpfr mpc isl z zstd; do
     ln -sf "lib${lib}.a" "$PREFIX/lib/lib${lib}.so"
 done
 
-# Verify arch (must be arm64 Mach-O, not Intel/ELF).
+# Verify arch (must be arm64 Mach-O, not Intel/ELF). This is DIAGNOSTIC ONLY — each
+# lib's presence was already asserted at extraction (the WANT_LIB check above). The
+# `ls *.o | head -1` pipe closes early and SIGPIPEs `ls`; under `set -o pipefail` that
+# bubbles up as exit 141 and (with set -e) kills the whole build over a printout. Run
+# the loop with pipefail off so the diagnostic can never fail the deps step.
 echo "=== Verify arm64 Mach-O ==="
-for lib in gmp mpfr mpc isl z zstd; do
+( set +o pipefail
+  for lib in gmp mpfr mpc isl z zstd; do
     _o=$(mktemp -d)
     ( cd "$_o" && ar x "$PREFIX/lib/lib${lib}.a" 2>/dev/null
       o=$(ls *.o 2>/dev/null | head -1)
       printf '  lib%-6s %s\n' "$lib.a" "$([ -n "$o" ] && file -b "$o" | cut -d, -f1 || echo '(empty)')" )
     rm -rf "$_o"
-done
+  done )
 echo "=== darwin deps ready: $PREFIX ==="
 ls -la "$PREFIX/lib/lib"{gmp,mpfr,mpc,isl,z,zstd}.a
