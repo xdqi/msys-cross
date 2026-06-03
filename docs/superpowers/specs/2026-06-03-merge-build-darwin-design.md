@@ -36,13 +36,13 @@ The shared body (Steps 0–6) reads those variables and has a few inline
 | `ZIG_TARGET` | `x86_64-linux-gnu.2.11` (set explicitly; was previously unset/defaulted) | `aarch64-macos.11.0` |
 | `PKGDEST` | `repo/` | `repo-darwin/` |
 | `DEPS_INSTALL` / `DEPS` | `deps/install-$ZIG_TARGET` (unified — see note 1) | `deps/install-$ZIG_TARGET` |
-| `INSTALL_PREFIX` | `build/install-prefix-$ZIG_TARGET` (unified — see note 2) | `build/install-prefix-$ZIG_TARGET` |
+| `INSTALL_PREFIX` | `build/install-$ZIG_TARGET` (unified — see note 2) | `build/install-$ZIG_TARGET` |
 | `_MSYS_CROSS_HOST` | `x86_64-linux-gnu` | `aarch64-apple-darwin20` |
 | `_MSYS_CROSS_DUMPSPECS` | unset (native xgcc) — **must stay unset on linux** (note 3) | `1` |
 | `_MSYS_CROSS_MAKEPKG_CONFIG` | unset | `$SCRIPTS_DIR/makepkg-darwin-arm64.conf` |
 | host pacman pkgs | union list (note 4) | union list |
 | makepkg args | `build_pkg` default (`-fCd --skippgpcheck`) | `-fCd --skippgpcheck --nocheck --ignorearch` |
-| Step 2 extra | — | `chown -R builduser specs-helper` after sysroot prep |
+| Step 2 extra | now also creates specs-helper (wine in union list, note 5) — chown applies | `chown -R builduser specs-helper` after sysroot prep |
 | Step 3 deps | `run_as_builduser bash build_deps.sh` | `bash build-deps-darwin.sh` (root) + `chown DEPS_INSTALL` |
 | Step 4b clang | **built** | **skipped** |
 | Step 5 db name | `msys-cross` | `msys-cross-darwin` |
@@ -58,12 +58,13 @@ The shared body (Steps 0–6) reads those variables and has a few inline
    way. Verified safe: no CI cache keys on this path (CI caches only
    `build/sccache-cache`, `build/.deps-src`, `build/sources`).
 
-2. **`INSTALL_PREFIX` unified to `build/install-prefix-$ZIG_TARGET`.** Currently
+2. **`INSTALL_PREFIX` unified to `build/install-$ZIG_TARGET`.** Currently
    linux uses `build/install-prefix` and darwin `build/install-prefix-darwin`.
-   Keying both on `$ZIG_TARGET` unifies them. `msys-cross-common.sh:29` defaults to
-   `build/install-prefix` only when `INSTALL_PREFIX` is unset — `build.sh` always
-   exports it, so the lib default is never consulted in CI. Verified safe: not a CI
-   cache path.
+   Keying both on `$ZIG_TARGET` unifies them to `build/install-$ZIG_TARGET` (the
+   `-prefix` infix is dropped in the unified name). `msys-cross-common.sh:29`
+   defaults to `build/install-prefix` only when `INSTALL_PREFIX` is unset —
+   `build.sh` always exports it, so the lib default is never consulted in CI.
+   Verified safe: not a CI cache path; nothing reads the literal directory name.
 
 3. **`_MSYS_CROSS_DUMPSPECS` stays darwin-only.** It is read by the GCC/cygwin-gcc
    PKGBUILDs to enable the wine specs-helper path (Canadian-cross). On linux the
@@ -75,6 +76,21 @@ The shared body (Steps 0–6) reads those variables and has a few inline
    (from-source pacman makedeps) and `wine` (darwin specs-helper) are harmless when
    present-but-unused on the other target. Removes the per-target package-list
    branch.
+
+5. **Side effect of installing `wine` on linux: specs-helper now gets generated on
+   linux too.** `prepare-build-sysroot.sh:122` gates wine specs-helper generation on
+   `command -v wine`. Pre-merge, linux had no wine, so it hit the `else` branch and
+   never created `$BOOTSTRAP_PREFIX/specs-helper/`. With wine in the union list, the
+   linux run now *also* generates the wrappers + a root-owned wineprefix. This is
+   harmless at build time — linux keeps `_MSYS_CROSS_DUMPSPECS` unset (note 3), so the
+   GCC PKGBUILDs never invoke these wrappers; the native xgcc runs directly as before.
+   But two consequences follow:
+   - The `chown -R builduser specs-helper` (was darwin-only) must now run on **both**
+     targets, since the dir exists on linux too. Make it guarded:
+     `[ -d "$BOOTSTRAP_PREFIX/specs-helper" ] && chown -R builduser:builduser "$BOOTSTRAP_PREFIX/specs-helper"`.
+   - Linux pays a small one-time `wineboot -i` cost it didn't before. Acceptable; if
+     undesirable later, gate wine out of the linux HOST_PKGS — but the union list is
+     the simpler default per the user's preference.
 
 ## Shared body structure (after merge)
 
@@ -97,7 +113,7 @@ Step 0  host tools: pacman -Syu + install union HOST_PKGS; create builduser
         source build-common.sh
 Step 1  prepare-zig.sh
 Step 2  prepare-build-sysroot.sh
-        if darwin: chown specs-helper
+        [ -d specs-helper ] && chown specs-helper   (now created on both targets, note 5)
 Step 3  if darwin: bash build-deps-darwin.sh (root) + chown DEPS_INSTALL
         else:      run_as_builduser bash build_deps.sh
 Step 4  build_pkg "<pkg>" "$MAKEPKG_ARGS"   (foundation, binutils loop, gcc loop, cygwin-gcc)
@@ -134,7 +150,8 @@ the arg (keeps the default); darwin passes the `-fCd --skippgpcheck --nocheck
 
 The real proof is a green build, but a full toolchain build is heavy. Tiered:
 
-1. **Static**: `bash -n scripts/build.sh` (syntax). (`shellcheck` not installed here.)
+1. **Static**: `bash -n scripts/build.sh` (syntax) + `shellcheck scripts/build.sh`
+   (now installed — treat new warnings it raises on the merged script as blocking).
 2. **Dry-trace**: run the per-target config block in isolation for both
    `TARGET=linux` and `TARGET=darwin`, print the resolved env (PKGDEST, ZIG_TARGET,
    DEPS_INSTALL, INSTALL_PREFIX, _MSYS_CROSS_*, MAKEPKG_ARGS, DB_NAME, BUILD_CLANG)
