@@ -37,6 +37,10 @@ fi
 
 ln -sfn "zig-x86_64-linux-$ZIG_VER" "$PROJECT_ROOT/build/zig"
 
+# Patch bundled libc++ so C++17 aligned new/delete links for old-glibc targets
+# (idempotent + self-verifying). See scripts/patch_zig_libcxx_oldglibc.sh.
+"$SCRIPTS_DIR/patch_zig_libcxx_oldglibc.sh" "$ZIG_INSTALL_DIR"
+
 echo "Zig $ZIG_VER ready:"
 "$PROJECT_ROOT/build/zig/zig" version
 echo "  ZIG_PATH=$PROJECT_ROOT/build/zig"
