@@ -1,12 +1,16 @@
-# Shared helpers for the zigcc / zigc++ wrappers — SOURCED, never exec'd.
+# The full body of the zigcc / zigc++ wrappers — SOURCED, never exec'd. Each wrapper is
+# just a shebang + `source .../zig-common.sh <mode> "$@"`, where <mode> is the literal
+# `cc` or `c++` token that is this file's only point of variation; everything else lives
+# here and is driven by zig_main (below).
 #
-# This is deliberately a sourced library, not an executable driver: the wrappers
-# `source` it so $0 stays the wrapper itself (a real clang-like cc/c++). sccache
-# probes the wrapped compiler and reconstructs the compile from $0; an exec'd
-# `bash driver.sh <sub>` layer makes $0 the driver, which broke sccache's probe and
-# dropped the C++ language selection (libc++ "is_trivially_destructible not
-# implemented" / integer-pack errors when building GCC's .c-as-C++ units). Sourcing
-# keeps the dedup without that indirection.
+# It is deliberately sourced, not run as `bash driver.sh <sub>`: sourcing keeps $0 as the
+# wrapper itself (a real clang-like cc/c++), which is what sccache probes and reconstructs
+# the compile from. An exec'd driver layer makes $0 the driver, which broke sccache's probe
+# and dropped the C++ language selection (libc++ "is_trivially_destructible not implemented"
+# / integer-pack errors when building GCC's .c-as-C++ units).
+#
+# It is NOT a symlink target either: a symlink would hand sccache identical bytes for the cc
+# and c++ roles, collide their cache keys, and reintroduce the same C++-selection bug.
 
 # The zig compilation target. Defaults to the canonical Linux glibc target; override
 # via the ZIG_TARGET env var to retarget the whole toolchain (e.g. aarch64-macos.11.0
@@ -102,3 +106,34 @@ zig_filter_args() {
         ZIG_ARGS+=("$a")
     done
 }
+
+# zig_main cc|c++ "$@"
+# The whole wrapper body, so zigcc / zigc++ are each just a shebang + one `source` of
+# this file, differing only in the mode token (cc / c++) they pass as the first arg:
+#   source .../zig-common.sh cc  "$@"      # zigcc
+#   source .../zig-common.sh c++ "$@"      # zigc++
+# (No symlink — a symlink would feed identical bytes to sccache for both roles and
+# collide their cache keys; two tiny wrappers passing different modes is the point.)
+# Sourcing keeps $0 as the wrapper itself, which is what sccache probes and what
+# zig_sccache_reexec re-execs as `sccache "$0" …`; the mode rides through that round-trip
+# as a normal positional arg, so the inner role still drives the right compiler.
+# c++ mode adds an explicit `-x c++` on compile invocations so a .c source
+# (libgcc/libgcov-util.c etc.) engages libc++'s C++ frontend — see zigc++ history for the
+# <type_traits> errors otherwise.
+zig_main() {
+    local mode="$1"; shift   # cc | c++ ; the rest of "$@" is the real compiler command line
+    case "$mode" in
+        cc|c++) ;;
+        *) echo "zig-common.sh: bad mode '$mode' (expected cc or c++)" >&2; exit 2 ;;
+    esac
+
+    zig_handle_dumpmachine "$@"    # gcc-compatible -dumpmachine (exits 0)
+    zig_sccache_reexec "$@"        # outer role re-execs under sccache; inner falls through
+    zig_filter_args "$@"           # sets ZIG_ARGS (filtered), ZIG_IS_COMPILE
+
+    local xflag=()
+    [ "$mode" = c++ ] && $ZIG_IS_COMPILE && xflag=(-x c++)
+    exec zig "$mode" "${xflag[@]}" -target "$ZIG_CC_TARGET" "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"
+}
+
+zig_main "$@"

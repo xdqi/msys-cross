@@ -1,15 +1,8 @@
 #!/bin/bash
-# zig c++ wrapper, optionally routed through sccache. Shares zig-common.sh with
-# zigcc (sourced, not exec'd — $0 stays this script for sccache's probe). The only
-# difference vs zigcc: compile invocations (-c/-E/-S) need an explicit `-x c++` so a
-# .c source (libgcc/libgcov-util.c etc.) is compiled as C++; without it libc++'s C++
-# frontend isn't engaged and <type_traits> errors out ("is_trivially_destructible
-# not implemented", "integer pack" …).
-source "$(dirname "$(readlink -f "$0")")/zig-common.sh"
-
-zig_handle_dumpmachine "$@"    # gcc-compatible -dumpmachine (exits 0); see zig-common.sh
-zig_sccache_reexec "$@"
-zig_filter_args "$@"
-xflag=()
-$ZIG_IS_COMPILE && xflag=(-x c++)
-exec zig c++ "${xflag[@]}" -target "$ZIG_CC_TARGET" "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"
+# zig c++ wrapper, optionally routed through sccache. The entire body lives in
+# zig-common.sh; this file is intentionally just a shebang + one `source`, passing the
+# mode token `c++` so zig-common.sh drives `zig c++` and adds an explicit `-x c++` on
+# compile invocations (so a .c source is compiled as C++ — see zig-common.sh). SOURCED,
+# not exec'd, so $0 stays this script for sccache's probe; not a symlink either (a
+# symlink would collide the cc/c++ sccache cache keys). See zig-common.sh for the rest.
+source "$(dirname "$(readlink -f "$0")")/zig-common.sh" c++ "$@"
