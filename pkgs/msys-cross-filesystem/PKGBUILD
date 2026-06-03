@@ -1,7 +1,7 @@
 # Maintainer: msys2-cross project
 pkgname=msys-cross-filesystem
 pkgver=1.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Base filesystem skeleton and triple symlinks for msys2-cross toolchain"
 arch=('x86_64')
 options=('!strip')
@@ -13,6 +13,8 @@ package() {
     mkdir -p "$pkgdir/mingw64"
     mkdir -p "$pkgdir/mingw32"
     mkdir -p "$pkgdir/ucrt64"
+    mkdir -p "$pkgdir/clang64"
+    mkdir -p "$pkgdir/clangarm64"
     mkdir -p "$pkgdir/usr"
 
     ln -sf mingw64/ "$pkgdir/x86_64-w64-mingw32"

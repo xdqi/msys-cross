@@ -4,3 +4,6 @@
 [submodule "deps/pacman-static"]
 	path = deps/pacman-static
 	url = https://aur.archlinux.org/pacman-static.git/
+[submodule "deps/MINGW-packages"]
+	path = deps/MINGW-packages
+	url = https://github.com/msys2/MINGW-packages/
