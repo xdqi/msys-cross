@@ -118,6 +118,12 @@ build the static deps (gmp/mpfr/mpc/isl/zlib/zstd) → build each package with
 `makepkg` in dependency order → assemble the repo DB → build the bootstrap
 tarball. Output lands in `repo/`.
 
+Preparing Zig also patches its bundled libc++ (via `scripts/patch_zig_libcxx_oldglibc.sh`,
+applying the diffs in `scripts/zig-patches/`) so C++17 aligned `new`/`delete` links on the
+old-glibc target — no zig rebuild, no compat object, no extra `-D` flags. The patch is
+idempotent and self-verifying; `scripts/test-zig-oldglibc-patch.sh` checks it in a container
+against freshly downloaded stable and dev zig.
+
 Key build properties:
 
 - **Compiler driver:** `scripts/zigcc` / `zigc++` (`zig cc`/`zig c++` targeting
