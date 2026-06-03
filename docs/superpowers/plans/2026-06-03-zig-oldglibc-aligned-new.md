@@ -247,14 +247,30 @@ git commit -m "feat(zig-patch): wrapper — era detection + patch apply (idempot
 
 ---
 
-## Task 3: Self-verify (link probe) with rollback on failure
+## Task 3: Deterministic backups + self-verify (link probe) with rollback
 
 **Files:**
-- Modify: `scripts/patch_zig_libcxx_oldglibc.sh` (append self-verify; replace the trailing `# (Task 3 appends ...)` comment)
+- Modify: `scripts/patch_zig_libcxx_oldglibc.sh` — (a) make `apply_one` create an explicit backup before each apply; (b) replace the trailing `# (Task 3 appends self-verify below.)` comment with the self-verify + rollback + cleanup block.
 
-- [ ] **Step 1: Append the self-verify block**
+**Why explicit backups:** GNU `patch` only writes a `.orig` backup when an apply is *non-clean* (uses fuzz/offset). On a clean apply against a pristine tree it writes **no** `.orig`, so a rollback that looks for `.orig` files silently restores nothing. We force a deterministic backup with `-b --suffix=.anyfsbak` so rollback always works, and we clean the backups (and any `.rej`) on success. (Verified: `patch -b --suffix=.anyfsbak` produces a backup even on a clean apply; restoring from it rolls back to a zero-marker pristine state.)
 
-In `scripts/patch_zig_libcxx_oldglibc.sh`, replace the final line `# (Task 3 appends self-verify below.)` with:
+- [ ] **Step 1: Make `apply_one` create a deterministic backup**
+
+In `scripts/patch_zig_libcxx_oldglibc.sh`, change the `patch` invocation inside `apply_one` to add `-b --suffix=.anyfsbak`. Replace this line:
+
+```bash
+    out="$(patch -N -p1 --fuzz=3 -d "$LIBCXX" < "$pf" 2>&1)" && rc=0 || rc=$?
+```
+
+with:
+
+```bash
+    out="$(patch -N -b --suffix=.anyfsbak -p1 --fuzz=3 -d "$LIBCXX" < "$pf" 2>&1)" && rc=0 || rc=$?
+```
+
+- [ ] **Step 2: Append the self-verify + rollback + cleanup block**
+
+Replace the final line `# (Task 3 appends self-verify below.)` with:
 
 ```bash
 # ---- self-verify (backstop against a fuzzed mis-apply) ----
@@ -268,11 +284,12 @@ int main() { Big* p = new Big(); int r = (int)((uintptr_t)p & 63); delete p; ret
 EOF
 export ZIG_GLOBAL_CACHE_DIR="$PROBE_DIR/zc"   # isolated cache -> real libc++ recompile
 
-# Restore originals from patch's .orig backups (patch writes <file>.orig on first edit).
-restore_orig() {
-    find "$LIBCXX" -name '*.orig' -print0 | while IFS= read -r -d '' o; do
-        mv -f "$o" "${o%.orig}"
+# Restore originals from our deterministic .anyfsbak backups, then remove any .rej.
+restore_backups() {
+    find "$LIBCXX" -name '*.anyfsbak' -print0 | while IFS= read -r -d '' b; do
+        mv -f "$b" "${b%.anyfsbak}"
     done
+    find "$LIBCXX" -name '*.rej' -delete
 }
 
 verify_target() {  # <triple> <want-symbol> <forbid-symbol>
@@ -293,22 +310,22 @@ verify_target x86_64-linux-gnu.2.11 posix_memalign aligned_alloc || VERIFY_OK=0
 verify_target x86_64-linux-gnu.2.17 aligned_alloc ""             || VERIFY_OK=0
 
 if [ "$VERIFY_OK" -ne 1 ]; then
-    restore_orig
-    die "self-verify failed; libc++ restored from .orig"
+    restore_backups
+    die "self-verify failed; libc++ restored from backups"
 fi
 
-# success: drop patch's .orig backups
-find "$LIBCXX" -name '*.orig' -delete
+# success: drop our backups and any stray .rej (e.g. from an idempotent re-run)
+find "$LIBCXX" \( -name '*.anyfsbak' -o -name '*.rej' \) -delete
 echo "patch_zig_libcxx_oldglibc: OK (era=$ERA)"
 ```
 
-- [ ] **Step 2: Full run on a COPY of 0.16.0 (end-to-end)**
+- [ ] **Step 3: Full run on a COPY of 0.16.0 (end-to-end)**
 
 Run:
 ```bash
 T=$(mktemp -d -p /home/kosaka); cp -r /opt/zig-x86_64-linux-0.16.0 "$T/z"
 scripts/patch_zig_libcxx_oldglibc.sh "$T/z"
-echo "leftover .orig:"; find "$T/z/lib/libcxx" -name '*.orig'
+echo "leftover backups/rej:"; find "$T/z/lib/libcxx" \( -name '*.anyfsbak' -o -name '*.rej' \)
 rm -rf "$T"
 ```
 Expected output ends with:
@@ -317,9 +334,21 @@ Expected output ends with:
   verify OK: x86_64-linux-gnu.2.17 -> [aligned_alloc,]
 patch_zig_libcxx_oldglibc: OK (era=0.16.0)
 ```
-and `leftover .orig:` prints nothing.
+and `leftover backups/rej:` prints nothing.
 
-- [ ] **Step 3: Full run on a COPY of 0.17-dev (end-to-end)**
+- [ ] **Step 4: Idempotent re-run leaves no .rej litter**
+
+Run (apply twice, confirm the second run also ends OK and leaves no `.rej`/backup):
+```bash
+T=$(mktemp -d -p /home/kosaka); cp -r /opt/zig-x86_64-linux-0.16.0 "$T/z"
+scripts/patch_zig_libcxx_oldglibc.sh "$T/z" >/dev/null
+scripts/patch_zig_libcxx_oldglibc.sh "$T/z"
+echo "leftover after re-run:"; find "$T/z/lib/libcxx" \( -name '*.anyfsbak' -o -name '*.rej' \)
+rm -rf "$T"
+```
+Expected: second run prints `already applied (skipping)` for the patch(es) then the two `verify OK` lines and `OK (era=0.16.0)`; `leftover after re-run:` prints nothing (the success-path cleanup removes the `.rej` that `patch -N` drops on a re-apply).
+
+- [ ] **Step 5: Full run on a COPY of 0.17-dev (end-to-end)**
 
 Run:
 ```bash
@@ -329,13 +358,11 @@ rm -rf "$T"
 ```
 Expected: same two `verify OK` lines and `OK (era=0.17-dev)`.
 
-- [ ] **Step 4: Negative test — a broken patch must roll back and fail**
+- [ ] **Step 6: Negative test — a broken patch must roll back and fail**
 
-Verify the rollback path works: temporarily corrupt a copy's patch application by feeding a patch that applies but breaks the build is hard to stage; instead confirm `restore_orig` logic by simulating: apply, then check that if verify fails the originals come back. Run this controlled check:
+A bogus patch that applies but leaves the build broken must cause self-verify to fail and roll back to a pristine tree:
 ```bash
 T=$(mktemp -d -p /home/kosaka); cp -r /opt/zig-x86_64-linux-0.16.0 "$T/z"
-# Make a bogus patch dir where the config patch is replaced by one that applies
-# but writes a garbage macro, guaranteeing a link failure:
 cp -r scripts/zig-patches "$T/badpatches"
 cat > "$T/badpatches/config-0.16.0.patch" <<'PATCH'
 --- a/include/__config
@@ -351,22 +378,22 @@ cat > "$T/badpatches/config-0.16.0.patch" <<'PATCH'
  #  if defined(__APPLE__) || defined(__FreeBSD__)
  #    define _LIBCPP_WCTYPE_IS_MASK
 PATCH
-# Run a copy of the wrapper pointed at the bad patch dir by overriding PATCH_DIR via a temp script copy
+# Point the wrapper at the bad patch dir by rewriting PATCH_DIR in a temp copy:
 sed "s#\$SCRIPT_DIR/zig-patches#$T/badpatches#" scripts/patch_zig_libcxx_oldglibc.sh > "$T/wrap.sh"
 chmod +x "$T/wrap.sh"
 "$T/wrap.sh" "$T/z"; echo "exit=$?"
-echo "after failure, __config must be pristine (no marker):"
-grep -c 'anyfs override' "$T/z/lib/libcxx/include/__config"   # expect 0
-find "$T/z/lib/libcxx" -name '*.orig'                          # expect nothing (restored)
+echo "after failure, __config must be pristine (marker count 0):"
+grep -c 'anyfs override' "$T/z/lib/libcxx/include/__config"
+echo "no backups/rej left:"; find "$T/z/lib/libcxx" \( -name '*.anyfsbak' -o -name '*.rej' \)
 rm -rf "$T"
 ```
-Expected: the run prints `verify FAIL: x86_64-linux-gnu.2.11 …` then `self-verify failed; libc++ restored from .orig`, exits non-zero; the marker count is `0` (rolled back) and no `.orig` remains.
+Expected: prints `verify FAIL: x86_64-linux-gnu.2.11 …` then `self-verify failed; libc++ restored from backups`, exits non-zero; marker count `0` (rolled back); no `.anyfsbak`/`.rej` remain.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/patch_zig_libcxx_oldglibc.sh
-git commit -m "feat(zig-patch): self-verify link probe with .orig rollback"
+git commit -m "feat(zig-patch): self-verify link probe with deterministic-backup rollback"
 ```
 
 ---
