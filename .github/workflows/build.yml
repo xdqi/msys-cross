@@ -275,7 +275,7 @@ jobs:
             deps-src-${{ runner.os }}-
 
       - name: Build darwin toolchain repo
-        run: bash scripts/build-darwin.sh
+        run: bash scripts/build.sh darwin
 
       - name: sccache stats
         if: always()
