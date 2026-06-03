@@ -170,6 +170,20 @@ build() {
         return 1
     fi
 
+    # ---- Confine pkg-config to OUR prefixes (ALL platforms) ----
+    # pacman's meson does dependency('libseccomp') with auto-detect, which is HARDWIRED auto
+    # and NOT gated by the -Dfile-seccomp=disabled we set above (they are separate). If it
+    # finds the host's libseccomp.pc it sets HAVE_LIBSECCOMP → lib/libalpm/sandbox_syscalls.c
+    # #includes <seccomp.h>, which the zig sysroot lacks (linux glibc target) / macOS lacks →
+    # fatal "'seccomp.h' file not found". REPLACE the system search base (PKG_CONFIG_LIBDIR,
+    # not PKG_CONFIG_PATH which only prepends) so pkg-config sees ONLY our two prefixes and
+    # the probe finds nothing → HAVE_LIBSECCOMP unset → sandbox_syscalls.c is not compiled.
+    # All real deps (openssl/curl/archive/gpgme/zlib/zstd) live under these two prefixes, so
+    # nothing regresses; $_deps resolves per-platform (linux: install-x86_64-linux-gnu.2.11,
+    # darwin: install-aarch64-macos.11.0). This is correct hygiene for both builds — pacman
+    # here runs UNPRIVILEGED into a user prefix, so a syscall sandbox has no value anywhere.
+    export PKG_CONFIG_LIBDIR="${srcdir}/temp/usr/lib/pkgconfig:$_deps/lib/pkgconfig"
+
     # ---- macOS host (arm64) cross overrides ----
     # When building for a darwin host (CARCH=arm64, set by makepkg-darwin-arm64.conf), the
     # deps cross-compile under zig with a few adjustments (verified standalone; see
@@ -184,17 +198,8 @@ build() {
         # AUR's native-build form) tries to RUN an arm64 conftest on the Linux builder and
         # dies ("cannot run C compiled programs, use --host"). host != build → cross_compiling=yes.
         export build_alias=x86_64-pc-linux-gnu host_alias=aarch64-apple-darwin20
-        # Confine pkg-config to OUR prefixes (temp/usr where the deps install + the stolen
-        # $_deps), REPLACING the system search base via PKG_CONFIG_LIBDIR (PKG_CONFIG_PATH
-        # only PREPENDS, leaving the host's .pc visible). Without this, pacman's meson does
-        # dependency('libseccomp') with auto-detect and FINDS the Arch builder's host
-        # libseccomp.pc → sets HAVE_LIBSECCOMP → lib/libalpm/sandbox_syscalls.c #includes
-        # <seccomp.h>, absent for the macOS target. There is no -D to turn that probe off
-        # (it is hardwired auto, separate from the -Dfile-seccomp we already disable), so
-        # the only lever is to make pkg-config not see the host lib. All real deps
-        # (openssl/curl/archive/gpgme/zlib/zstd) live under these two prefixes, so nothing
-        # else regresses; this is also simply the correct hygiene for a cross build.
-        export PKG_CONFIG_LIBDIR="${srcdir}/temp/usr/lib/pkgconfig:$_deps/lib/pkgconfig"
+        # (PKG_CONFIG_LIBDIR confining pkg-config to our prefixes — needed to defeat meson's
+        # libseccomp auto-probe — is now set for ALL platforms just above the arm64 block.)
         # libarchive: its autoconf link-tests for these wchar funcs misfire under zig+darwin
         # (macOS HAS them), so it would declare static fallbacks that clash with the SDK's
         # non-static decls. Tell configure they exist.
