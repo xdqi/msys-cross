@@ -60,6 +60,7 @@ export ZIG_TARGET="x86_64-linux-gnu.2.11"
 export _MSYS_CROSS_HOST="x86_64-linux-gnu"
 export _MSYS_CROSS_BUILD="x86_64-linux-gnu"
 # _MSYS_CROSS_DUMPSPECS intentionally UNSET on linux (native xgcc runs directly).
+export _MSYS_CROSS_ENV_LOADED=1   # guard marker — see §5
 ```
 
 `scripts/env-darwin.sh`:
@@ -68,10 +69,13 @@ export ZIG_TARGET="aarch64-macos.11.0"
 export _MSYS_CROSS_HOST="aarch64-apple-darwin20"
 # _MSYS_CROSS_BUILD stays unset -> build machine is Linux (cross mode).
 export _MSYS_CROSS_DUMPSPECS=1
+export _MSYS_CROSS_ENV_LOADED=1   # guard marker — see §5
 ```
 
 These files are pure `export` statements — safe to `source` from any bash shell and
-from inside makepkg.
+from inside makepkg. The `_MSYS_CROSS_ENV_LOADED=1` marker lets consumers assert the
+env was sourced (§5); verified in the arch container to survive both `runuser` and the
+makepkg `--config` boundary into `build()`.
 
 ### 2. makepkg `.conf` sources the env file, then adds makepkg-only knobs
 
@@ -121,27 +125,100 @@ run_as_builduser() {
 `_MSYS_CROSS_ZLIB` is dropped (makepkg-local, never set at entrypoint). The explicit
 `SCCACHE_*` naming is dropped (already exported via `$GITHUB_ENV`).
 
+### 5. Remove the baked-in `${VAR:-default}` fallbacks (the *fourth* source)
+
+The env-owned vars also have hard-coded defaults scattered across consumers — a fourth
+place the canonical values live. With `env-<target>.sh` as the single source, these
+defaults must go; a consumer reached without the env sourced should **fail loudly**,
+not silently fall back to a Linux-shaped default (which on a darwin run produces a
+subtly wrong, hard-to-diagnose build).
+
+**Scope: layers A (entrypoint scripts) + B (PKGBUILDs). The zigcc wrapper keeps its
+fallback** (layer C) so a bare `CC=scripts/zigcc` still works standalone.
+
+**Guard mechanism — marker var, not per-var check.** The required-var *set differs by
+target* (`_MSYS_CROSS_BUILD` only on linux, `_MSYS_CROSS_DUMPSPECS` only on darwin), so
+"every var must be set" would wrongly fail. Instead env-`<target>`.sh exports a single
+`_MSYS_CROSS_ENV_LOADED=1` marker; consumers assert the marker (proving the env was
+sourced) and then read each var **without** a `:-default`:
+```sh
+[ "${_MSYS_CROSS_ENV_LOADED:-}" = 1 ] || {
+    echo "ERROR: source scripts/env-<target>.sh (or build via build.sh) first" >&2
+    exit 1
+}
+```
+Verified in the arch container: the marker survives both the `runuser` drop to
+builduser and the makepkg `--config` → `build()` boundary, so one check works in both
+contexts A and B.
+
+**Guard placement (no duplication):** the check lives ONCE at the top of
+`msys-cross-common.sh` — which is sourced (at line 3, before any default is used) by
+all three PKGBUILDs AND by `build_deps.sh`. Those four consumers inherit the guard for
+free; only the `:-` default *removal* is edited per-file. `build-deps-darwin.sh` does
+NOT source `msys-cross-common.sh`, so it carries its own copy of the 3-line guard.
+Entrypoints source `env-<target>.sh` first (§3), so by the time anything sources
+`msys-cross-common.sh` the marker is set.
+
+**Defaults to strip (each → bare `$VAR` after the guard):**
+
+Layer A (scripts) — strip `:-` defaults; guard inherited from msys-cross-common.sh
+unless noted:
+- `scripts/msys-cross-common.sh` — **hosts the guard** at top; strip `:25`
+  `${ZIG_TARGET:-…}` (`_deps` path) and `:145`,`:155` `${ZIG_TARGET:-}` `case` guards
+  → bare `$ZIG_TARGET`
+- `scripts/build_deps.sh:22` `${ZIG_TARGET:-…}`, `:118` `${_MSYS_CROSS_BUILD:-…}`,
+  `:119` `${_MSYS_CROSS_HOST:-…}` (guard inherited — already sources common at `:27`)
+- `scripts/build-deps-darwin.sh:20` `${ZIG_TARGET:-aarch64-macos.11.0}` (**own guard**
+  — does not source common)
+
+Layer B (PKGBUILDs — strip the host/build `sed`-injected defaults):
+- `pkgs/msys-cross-binutils/PKGBUILD:99,100` (`_MSYS_CROSS_BUILD`/`_MSYS_CROSS_HOST`)
+- `pkgs/msys-cross-gcc/PKGBUILD:13,14` (build/host sed)
+- `pkgs/msys-cross-cygwin-gcc/PKGBUILD:25` (build+host sed)
+
+**Deliberately NOT stripped:**
+- `scripts/zig-common.sh:19` `ZIG_CC_TARGET="${ZIG_TARGET:-x86_64-linux-gnu.2.11}"`
+  (layer C — wrapper's standalone safety net; kept per decision).
+- `_MSYS_CROSS_TARGET:-mingw64` in binutils/gcc PKGBUILDs (`:30`/`:45`) — this selects
+  *which* Windows target, is NOT an env-`<target>`.sh var, and the build always sets it
+  explicitly in the per-target loop. Out of scope for this change.
+- `_MSYS_CROSS_DUMPSPECS:-0` in gcc/cygwin-gcc PKGBUILDs (`:143`/`:140`) — read as
+  "is it `1`?", so unset is a *meaningful* value (off = linux native xgcc), not a
+  stand-in for a missing source. The marker guard already proves env was sourced;
+  `:-0` here is a legitimate off-switch default. **Kept.**
+
 ## Net result
 
-| Var | before (places) | after |
+| Var | before (declaration + default sites) | after |
 |---|---|---|
-| `ZIG_TARGET` | 3 (entry, conf, builduser-list) | 1 (`env-<target>.sh`) |
-| `_MSYS_CROSS_HOST` | 3 | 1 |
-| `_MSYS_CROSS_BUILD` | 2 (conf, builduser-list) | 1 |
-| `_MSYS_CROSS_DUMPSPECS` | 3 | 1 |
+| `ZIG_TARGET` | 6 (entry, conf, builduser-list, + 3 `:-` defaults) | 1 (`env-<target>.sh`) + zigcc safety-net fallback |
+| `_MSYS_CROSS_HOST` | 6 (3 set + 3 `:-` defaults across scripts/PKGBUILDs) | 1 |
+| `_MSYS_CROSS_BUILD` | 5 (2 set + 3 `:-` defaults) | 1 |
+| `_MSYS_CROSS_DUMPSPECS` | 3 set (+ `:-0` off-switch, kept) | 1 (the `:-0` off-switch stays) |
 | `run_as_builduser` env list | ~15 lines | 1 line (PATH only) |
+| baked-in `${VAR:-default}` (layers A+B) | ~10 sites | 0 (replaced by marker guard) |
 
 ## Blast radius
 
-- **New**: `scripts/env-linux.sh`, `scripts/env-darwin.sh`.
-- **Edited**: `scripts/build.sh`, `scripts/build-darwin.sh` (source env file),
+- **New**: `scripts/env-linux.sh`, `scripts/env-darwin.sh` (set vars + marker).
+- **Edited (scripts)**: `scripts/build.sh`, `scripts/build-darwin.sh` (source env file),
   `scripts/makepkg-linux-x86_64.conf`, `scripts/makepkg-darwin-arm64.conf` (source env
   file + keep only makepkg-only knobs), `scripts/build-common.sh` (slim
-  `run_as_builduser`).
-- **No change**: CI (`build.yml` still calls the same entrypoints), PKGBUILDs (they read
-  the same env vars, now sourced from one place), `build_deps.sh`,
-  `prepare-build-sysroot.sh`.
+  `run_as_builduser`), `scripts/build_deps.sh` + `scripts/build-deps-darwin.sh` +
+  `scripts/msys-cross-common.sh` (strip `:-` defaults, add marker guard).
+- **Edited (PKGBUILDs)**: `pkgs/msys-cross-binutils`, `pkgs/msys-cross-gcc`,
+  `pkgs/msys-cross-cygwin-gcc` PKGBUILDs (strip host/build `:-` defaults, add marker
+  guard). These already `source msys-cross-common.sh`, so the guard can live there once
+  and be inherited — see implementation note below.
+- **No change**: CI (`build.yml` still calls the same entrypoints),
+  `prepare-build-sysroot.sh`, `zig-common.sh` (keeps its fallback).
 - The later merge spec consumes this: merged `build.sh` does `source env-$TARGET.sh`.
+
+**Implementation note (avoid guard duplication):** the three PKGBUILDs all
+`source .../msys-cross-common.sh` at top. Put the marker guard once in
+`msys-cross-common.sh` (which is sourced by every PKGBUILD and by `build_deps.sh`),
+rather than copy-pasting it into each PKGBUILD. `build-deps-darwin.sh` (which does NOT
+source msys-cross-common.sh) gets its own one-line guard.
 
 ## Verification
 
