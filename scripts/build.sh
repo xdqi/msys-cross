@@ -62,10 +62,8 @@ case "$TARGET" in
         # names match.
         export MSYS_CROSS_MAKEPKG_CONFIG="$SCRIPTS_DIR/makepkg-darwin-arm64.conf"
         MAKEPKG_ARGS="-fCd --skippgpcheck --nocheck --ignorearch"
-        # install_local runs the HOST pacman (x86_64, Architecture=auto), which rejects the
-        # arm64 darwin packages ("package architecture is not valid"). Tell pacman to accept
-        # them via --arch arm64 (matches makepkg-darwin-arm64.conf CARCH). Unset on linux.
-        export INSTALL_ARCH="arm64"
+        # INSTALL_ARCH=arm64 (for install_local's host pacman --arch) is exported by
+        # env-darwin.sh, sourced above — the single source of truth for per-target env.
         # clang IS built for the darwin host: the same from-source PKGBUILD cross-builds
         # an arm64 Mach-O clang+lld with zig cc (build() branches on ZIG_TARGET for the
         # Darwin host triple / CMAKE_SYSTEM_NAME). Unlike gcc, clang is a single driver,
