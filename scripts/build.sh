@@ -123,6 +123,17 @@ build_pkg "msys-cross-cygwin-gcc"
 
 install_local "msys-cross-cygwin-gcc-*.pkg.tar.*"
 
+# ---- Step 4b: Clang cross toolchain ----
+# clang is a single driver: ONE self-built clang+lld serves every Windows target via
+# -target/--sysroot, so one heavy package (msys-cross-clang, binaries off-PATH under
+# libexec/) plus thin per-abi wrapper packages (clang64/clangarm64). LLVM is cross-built
+# from source with zig cc (the patched zig from Step 1 supplies the old-glibc aligned-new
+# fix); the version follows the mingw-w64-llvm submodule. Unconditional like gcc/binutils.
+echo ""
+echo "===== Step 4b: Clang cross toolchain ====="
+build_pkg "msys-cross-clang"   # builds all three split packages (pkgbase=msys-cross-clang)
+install_local "msys-cross-clang-*.pkg.tar.*"
+
 # ---- Step 5: Create repo database ----
 echo ""
 echo "===== Step 5: Repo database ====="
