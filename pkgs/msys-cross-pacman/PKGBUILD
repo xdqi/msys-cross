@@ -170,19 +170,16 @@ build() {
         return 1
     fi
 
-    # ---- Confine pkg-config to OUR prefixes (ALL platforms) ----
-    # pacman's meson does dependency('libseccomp') with auto-detect, which is HARDWIRED auto
-    # and NOT gated by the -Dfile-seccomp=disabled we set above (they are separate). If it
-    # finds the host's libseccomp.pc it sets HAVE_LIBSECCOMP → lib/libalpm/sandbox_syscalls.c
-    # #includes <seccomp.h>, which the zig sysroot lacks (linux glibc target) / macOS lacks →
-    # fatal "'seccomp.h' file not found". REPLACE the system search base (PKG_CONFIG_LIBDIR,
-    # not PKG_CONFIG_PATH which only prepends) so pkg-config sees ONLY our two prefixes and
-    # the probe finds nothing → HAVE_LIBSECCOMP unset → sandbox_syscalls.c is not compiled.
-    # All real deps (openssl/curl/archive/gpgme/zlib/zstd) live under these two prefixes, so
-    # nothing regresses; $_deps resolves per-platform (linux: install-x86_64-linux-gnu.2.11,
-    # darwin: install-aarch64-macos.11.0). This is correct hygiene for both builds — pacman
-    # here runs UNPRIVILEGED into a user prefix, so a syscall sandbox has no value anywhere.
-    export PKG_CONFIG_LIBDIR="${srcdir}/temp/usr/lib/pkgconfig:$_deps/lib/pkgconfig"
+    # ---- pkg-config: add this build's temp/usr prefix on top of the global confinement ----
+    # setup_zig_env (called at top level above) already set PKG_CONFIG_LIBDIR=$_deps/lib/pkgconfig
+    # for every build, REPLACING the system search base so no autoconf/meson/cmake probe sees a
+    # host .pc — that is what defeats pacman's hardwired dependency('libseccomp') (it would else
+    # find the Arch builder's libseccomp.pc → set HAVE_LIBSECCOMP → sandbox_syscalls.c #includes
+    # <seccomp.h>, absent from the zig sysroot → fatal). Here we only PREPEND this package's own
+    # temp/usr prefix (where build() seeds zlib/zstd and the AUR deps install) — which only
+    # exists inside makepkg's build() so it can't live in setup_zig_env. Prepend, don't redefine,
+    # so the global system-confinement is preserved.
+    export PKG_CONFIG_LIBDIR="${srcdir}/temp/usr/lib/pkgconfig:${PKG_CONFIG_LIBDIR}"
 
     # ---- macOS host (arm64) cross overrides ----
     # When building for a darwin host (CARCH=arm64, set by makepkg-darwin-arm64.conf), the

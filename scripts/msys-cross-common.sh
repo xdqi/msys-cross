@@ -170,4 +170,14 @@ setup_zig_env() {
         *)
             export LDFLAGS="-L$_deps/lib -Wl,-Bstatic -lgmp -lmpfr -lmpc -lisl -lz -lzstd -Wl,-Bdynamic" ;;
     esac
+    # Confine pkg-config to OUR deps prefix for EVERY build — gcc/binutils/clang/cygwin-gcc/
+    # pacman/build_deps all route through setup_zig_env. PKG_CONFIG_LIBDIR REPLACES the system
+    # search base (PKG_CONFIG_PATH only PREPENDS, leaving host .pc visible), so no build's
+    # autoconf/meson/cmake probe can auto-pick up a host library. This is correct cross-build
+    # hygiene for all packages, not just the one that happened to trip over it: pacman's
+    # hardwired dependency('libseccomp') would otherwise find the Arch builder's libseccomp.pc
+    # and #include <seccomp.h> (absent from the zig sysroot). Packages with an extra per-build
+    # prefix that only exists inside makepkg's build() (e.g. pacman's $srcdir/temp/usr) PREPEND
+    # it to this value there rather than redefining it.
+    export PKG_CONFIG_LIBDIR="$_deps/lib/pkgconfig"
 }
