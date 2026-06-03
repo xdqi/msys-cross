@@ -44,8 +44,10 @@ source=("file://$_startdir/wrapper.in"
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
 noextract=("llvm-project-${_pkgver}.src.tar.xz")   # 167MB → ~2GB; extracted in build()
 
-# Tools the wrapper dispatches to (installed into libexec from the build tree).
-_llvmtools=(ar ranlib nm strip objcopy objdump readobj dlltool rc cxxfilt size)
+# Real llvm-* binaries that exist in the build tree (ninja builds these as targets).
+# ranlib/strip/dlltool are NOT here — they are install-time symlinks (-> ar / objcopy)
+# that package() recreates. ninja in build() builds exactly this set.
+_llvmrealtools=(ar nm objcopy objdump readobj rc cxxfilt size)
 # bin/<triple>-<tool> symlinks each wrapper package creates.
 _wraptools=(clang clang++ cc c++ cpp as ld ar ranlib strip nm objdump objcopy readobj dlltool windres rc)
 
@@ -115,12 +117,18 @@ package_msys-cross-clang() {
     ln -sf "clang-$_resver" "$lx/clang++"
     ln -sf lld              "$lx/ld.lld"
 
-    # llvm-* binutils (small, independent execs). install dereferences the symlinked
-    # tools (ranlib/strip/dlltool) to standalone binaries.
+    # llvm-* binutils. Only the REAL binaries exist in the build tree; ranlib/strip/
+    # dlltool are symlinks LLVM normally creates at `ninja install` time (which we don't
+    # run — we copy from the build tree). Install the real ones, then recreate the three
+    # tool-symlinks ourselves (matching llvm's install layout: ranlib/dlltool -> ar,
+    # strip -> objcopy). The wrapper dispatches to all of llvm-{ar,ranlib,strip,nm,...}.
     local t
-    for t in "${_llvmtools[@]}"; do
+    for t in "${_llvmrealtools[@]}"; do
         install -m755 "$bin/llvm-$t" "$lx/llvm-$t"
     done
+    ln -sf llvm-ar      "$lx/llvm-ranlib"
+    ln -sf llvm-ar      "$lx/llvm-dlltool"
+    ln -sf llvm-objcopy "$lx/llvm-strip"
 
     # clang's own intrinsics resource headers (mm_malloc.h etc.) — referenced by the
     # cfg via -idirafter; the official compiler-rt package does not ship them.
