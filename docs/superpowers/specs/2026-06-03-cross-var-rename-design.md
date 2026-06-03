@@ -11,7 +11,7 @@ work onto renamed vars.
 ## Motivation
 
 The cross-build env contract uses a leading-underscore convention: `_MSYS_CROSS_HOST`,
-`_MSYS_CROSS_BUILD`, `_MSYS_CROSS_TARGET`, `_MSYS_CROSS_DUMPSPECS`, `_MSYS_CROSS_ZLIB`,
+`_MSYS_CROSS_BUILD`, `_MSYS_CROSS_TARGET`, `_MSYS_CROSS_DUMPSPECS`,
 `_MSYS_CROSS_MAKEPKG_CONFIG`. The leading `_` normally signals "private/local," but
 these are the opposite — a deliberately *shared*, cross-file/cross-process contract.
 And only this handful of vars uses the prefix; the rest of the codebase's env
@@ -30,9 +30,10 @@ _MSYS_CROSS_HOST           -> MSYS_CROSS_HOST
 _MSYS_CROSS_BUILD          -> MSYS_CROSS_BUILD
 _MSYS_CROSS_TARGET         -> MSYS_CROSS_TARGET
 _MSYS_CROSS_DUMPSPECS      -> MSYS_CROSS_DUMPSPECS
-_MSYS_CROSS_ZLIB           -> MSYS_CROSS_ZLIB
 _MSYS_CROSS_MAKEPKG_CONFIG -> MSYS_CROSS_MAKEPKG_CONFIG
 ```
+(`_MSYS_CROSS_ZLIB` is NOT here — the env spec §4b deletes it as dead code before this
+sweep runs, so by now it no longer exists.)
 
 **(b) The PKGBUILD-local that only LOOKS like a contract var — demote to a plain
 local** (set + read only inside one `build()` in each of 2 PKGBUILDs; it is genuinely
@@ -65,7 +66,8 @@ entrypoints, so post-merge the same tokens live in fewer files):
 | `pkgs/msys-cross-cygwin-gcc/PKGBUILD` | incl. `sed`-injected host/build + DUMPSPECS test |
 
 Per-var (pre-merge): TARGET 26, HOST 12, BUILD 9, DUMPSPECS 6, MAKEPKG_CONFIG 4,
-ZLIB 3, SPECS_GCC 8 (the latter only in gcc + cygwin-gcc PKGBUILDs).
+SPECS_GCC 8 (the latter only in gcc + cygwin-gcc PKGBUILDs). `ZLIB` (3 occ.) is gone —
+deleted by env spec §4b before this runs.
 
 **Collision check (done):** no bare `MSYS_CROSS_` (without leading `_`) exists anywhere
 in `scripts/` or `pkgs/` today, so the (a)-substitution cannot clash. No bare

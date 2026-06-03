@@ -40,9 +40,10 @@ means editing all three in lockstep; drift is silent.
 - **`SCCACHE_PATH` / `SCCACHE_DIR` / `SCCACHE_CACHE_SIZE`** are written to `$GITHUB_ENV`
   by CI (`build.yml:80-82`), so GitHub Actions injects them into the process
   environment of every later step — already exported, survive `runuser` automatically.
-- **`_MSYS_CROSS_ZLIB`** is only ever set *inside* a PKGBUILD (makepkg-local, e.g.
-  `binutils` `--prefix` logic); it is never set at the entrypoint level, so forwarding
-  it from `run_as_builduser` is dead weight.
+- **`_MSYS_CROSS_ZLIB`** is **never assigned anywhere** in the repo (verified via
+  `git log -S'_MSYS_CROSS_ZLIB='` — only references, no assignment). It's a
+  designed-but-unused escape hatch, so both forwarding it and reading it are dead. It is
+  deleted entirely (§4b), not merely dropped from the forward list.
 
 ## Design
 
@@ -128,8 +129,29 @@ run_as_builduser() {
     runuser -w PATH -u builduser -- env PATH="$PATH" "$@"
 }
 ```
-`_MSYS_CROSS_ZLIB` is dropped (makepkg-local, never set at entrypoint). The explicit
-`SCCACHE_*` naming is dropped (already exported via `$GITHUB_ENV`).
+`_MSYS_CROSS_ZLIB` is dropped from the forward list (see §4b — it's dead and removed
+entirely). The explicit `SCCACHE_*` naming is dropped (already exported via
+`$GITHUB_ENV`).
+
+### 4b. Delete the dead `_MSYS_CROSS_ZLIB` escape hatch
+
+`_MSYS_CROSS_ZLIB` is a designed-but-never-used knob. Verified via `git log -S`: it has
+**never been assigned** anywhere since it was introduced — only referenced. It exists in
+three spots, all dead:
+- `pkgs/msys-cross-binutils/PKGBUILD:102` `"${_MSYS_CROSS_ZLIB---with-system-zlib}"` —
+  uses `${VAR-default}` (unset → default), and since it's always unset it always
+  expands to `--with-system-zlib`. The darwin build relies on that default working, and
+  it does: `build-deps-darwin.sh` provisions `libz.a` into the deps prefix, so
+  `--with-system-zlib` resolves on darwin too.
+- `pkgs/msys-cross-binutils/PKGBUILD:96` — an explanatory comment for the unused knob.
+- `scripts/build-common.sh:30` — the `${_MSYS_CROSS_ZLIB+…}` forward (removed by §4's
+  slim anyway).
+
+**Change:** hardcode binutils' configure flag to the only value it ever takes —
+`--with-system-zlib` — and delete the comment + the forward line. This removes one var
+from the cross contract entirely (so the rename spec drops the `ZLIB` row).
+If a future macOS host genuinely lacks libz, reintroduce the knob deliberately at that
+point — it's a one-line change and the git history documents the original intent.
 
 ### 5. Remove the baked-in `${VAR:-default}` fallbacks (the *fourth* source)
 
@@ -213,9 +235,9 @@ Layer B (PKGBUILDs — strip the host/build `sed`-injected defaults):
   `run_as_builduser`), `scripts/build_deps.sh` + `scripts/build-deps-darwin.sh` +
   `scripts/msys-cross-common.sh` (strip `:-` defaults, add marker guard).
 - **Edited (PKGBUILDs)**: `pkgs/msys-cross-binutils`, `pkgs/msys-cross-gcc`,
-  `pkgs/msys-cross-cygwin-gcc` PKGBUILDs (strip host/build `:-` defaults, add marker
-  guard). These already `source msys-cross-common.sh`, so the guard can live there once
-  and be inherited — see implementation note below.
+  `pkgs/msys-cross-cygwin-gcc` PKGBUILDs (strip host/build `:-` defaults; guard
+  inherited via the common source). `binutils` additionally drops the dead
+  `_MSYS_CROSS_ZLIB` knob → hardcodes `--with-system-zlib` (§4b).
 - **No change**: CI (`build.yml` still calls the same entrypoints),
   `prepare-build-sysroot.sh`, `zig-common.sh` (keeps its fallback).
 - The later merge spec consumes this: merged `build.sh` does `source env-$TARGET.sh`.
