@@ -117,8 +117,8 @@ do_build() {
     # host/build overridable (war-future, consistent with the PKGBUILDs): host != build
     # puts autoconf in cross mode so it won't RUN the (non-native) conftest.
     ../$dir/configure --prefix="$PREFIX" --enable-static --disable-shared \
-        --build="$_MSYS_CROSS_BUILD" \
-        --host="$_MSYS_CROSS_HOST" $extra
+        --build="$MSYS_CROSS_BUILD" \
+        --host="$MSYS_CROSS_HOST" $extra
     # make_tgt lets a dep build ONLY its library (skip noinst test programs) — needed
     # for isl, whose C++ test progs pull legacy Mach-O libtool link flags on darwin and
     # are pure waste here. Default (empty) = full `all` for the rest.

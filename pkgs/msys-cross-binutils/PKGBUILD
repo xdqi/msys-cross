@@ -20,14 +20,14 @@ _our_pkgrel=1
 pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 
 # ---- Single-target build (one target per makepkg run) ----
-# _MSYS_CROSS_TARGET selects exactly ONE target: mingw64 | mingw32 | ucrt64 | cygwin.
+# MSYS_CROSS_TARGET selects exactly ONE target: mingw64 | mingw32 | ucrt64 | cygwin.
 # Default mingw64 so a bare `makepkg` / `makepkg --packagelist` is well-defined;
 # scripts/build.sh sets it explicitly once per target. The single value drives the
 # per-target DEBUG package: pkgbase is set to this target's binutils package below,
 # so makepkg's native split emits "<pkgbase>-debug" = msys-cross-<target>-binutils-debug
 # (makepkg hardcodes the debug pkg name to $pkgbase-debug — per-target debug
 # REQUIRES a per-target pkgbase, i.e. one target per run).
-_mct="${_MSYS_CROSS_TARGET:-mingw64}"
+_mct="${MSYS_CROSS_TARGET:-mingw64}"
 
 # _mct → host target triple + MSYS2 sysroot subdir.
 case "$_mct" in
@@ -35,7 +35,7 @@ case "$_mct" in
     mingw32) _mct_triple=i686-w64-mingw32;       _mct_subdir=mingw32 ;;
     ucrt64)  _mct_triple=x86_64-w64-mingw32ucrt; _mct_subdir=ucrt64 ;;
     cygwin)  _mct_triple=x86_64-pc-cygwin;       _mct_subdir=usr ;;
-    *) echo "ERROR: _MSYS_CROSS_TARGET must be mingw64|mingw32|ucrt64|cygwin (got '$_mct')" >&2
+    *) echo "ERROR: MSYS_CROSS_TARGET must be mingw64|mingw32|ucrt64|cygwin (got '$_mct')" >&2
        return 1 2>/dev/null || exit 1 ;;
 esac
 
@@ -87,7 +87,7 @@ _build_one() {
         _conf+=' --enable-64-bit-bfd'
     fi
 
-    # --build/--host come from _MSYS_CROSS_BUILD / _MSYS_CROSS_HOST (set by
+    # --build/--host come from MSYS_CROSS_BUILD / MSYS_CROSS_HOST (set by
     # env-<target>.sh; e.g. host=aarch64-apple-darwin20 for a macOS-hosted cross
     # binutils). host != build forces configure into cross mode, so it won't try to RUN
     # the (non-native) conftest. The actual output arch is decided by the zig wrapper's
@@ -95,8 +95,8 @@ _build_one() {
     # zlib: --with-system-zlib resolves on every host — the system libz on Linux, and
     # the libz.a provisioned into the deps prefix on darwin (build-deps-darwin.sh).
     "${srcdir}/binutils-${pkgver}/configure" \
-        --build="$_MSYS_CROSS_BUILD" \
-        --host="$_MSYS_CROSS_HOST" \
+        --build="$MSYS_CROSS_BUILD" \
+        --host="$MSYS_CROSS_HOST" \
         --target="$target" \
         --prefix=/ --disable-werror --with-system-zlib \
         $_conf

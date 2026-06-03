@@ -9,9 +9,9 @@
 # This sources the raw MSYS2 PKGBUILD, then lets the caller override
 # metadata (pkgname, depends) and fix functions via sed.
 
-# Guard: the per-target cross env (ZIG_TARGET, _MSYS_CROSS_*) must have been sourced
+# Guard: the per-target cross env (ZIG_TARGET, MSYS_CROSS_*) must have been sourced
 # from scripts/env-<target>.sh first. The required var SET differs by target
-# (_MSYS_CROSS_BUILD only on linux, _MSYS_CROSS_DUMPSPECS only on darwin), so we assert
+# (MSYS_CROSS_BUILD only on linux, MSYS_CROSS_DUMPSPECS only on darwin), so we assert
 # the single MSYS_CROSS_ENV_LOADED marker rather than checking each var. This file is
 # sourced (before any default is read) by all three cross PKGBUILDs and by build_deps.sh,
 # so they all inherit the guard. The marker survives both the runuser drop and the

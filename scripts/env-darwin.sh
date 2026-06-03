@@ -7,7 +7,7 @@
 # through `runuser` (exported vars survive; only PATH is reset) and the makepkg
 # `--config` -> build() boundary.
 export ZIG_TARGET="aarch64-macos.11.0"
-export _MSYS_CROSS_HOST="aarch64-apple-darwin20"
-# _MSYS_CROSS_BUILD stays unset -> build machine is Linux (host != build => cross mode).
-export _MSYS_CROSS_DUMPSPECS=1
+export MSYS_CROSS_HOST="aarch64-apple-darwin20"
+# MSYS_CROSS_BUILD stays unset -> build machine is Linux (host != build => cross mode).
+export MSYS_CROSS_DUMPSPECS=1
 export MSYS_CROSS_ENV_LOADED=1   # guard marker (no leading _ — see naming spec)

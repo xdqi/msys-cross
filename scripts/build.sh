@@ -32,11 +32,11 @@ PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
 # ---- Per-target config ----
 # Sets the env file to source, PKGDEST, makepkg knobs, clang gate, db name, and
-# (darwin only) the installer overrides. ZIG_TARGET / _MSYS_CROSS_HOST /
-# _MSYS_CROSS_DUMPSPECS come from `source env-$TARGET.sh` — never re-set inline.
+# (darwin only) the installer overrides. ZIG_TARGET / MSYS_CROSS_HOST /
+# MSYS_CROSS_DUMPSPECS come from `source env-$TARGET.sh` — never re-set inline.
 case "$TARGET" in
     linux)
-        # Per-target cross env (ZIG_TARGET, _MSYS_CROSS_HOST/_MSYS_CROSS_BUILD, the
+        # Per-target cross env (ZIG_TARGET, MSYS_CROSS_HOST/MSYS_CROSS_BUILD, the
         # MSYS_CROSS_ENV_LOADED marker) — single source of truth, shared with the makepkg
         # conf. Sourced first so the marker guard in msys-cross-common.sh / build_deps.sh
         # passes and the consumers can read each var without a baked-in default.
@@ -49,8 +49,8 @@ case "$TARGET" in
         DB_NAME="msys-cross"
         ;;
     darwin)
-        # Per-target cross env (ZIG_TARGET=arm64 macOS 11.0, _MSYS_CROSS_HOST,
-        # _MSYS_CROSS_DUMPSPECS, the MSYS_CROSS_ENV_LOADED marker) — single source of
+        # Per-target cross env (ZIG_TARGET=arm64 macOS 11.0, MSYS_CROSS_HOST,
+        # MSYS_CROSS_DUMPSPECS, the MSYS_CROSS_ENV_LOADED marker) — single source of
         # truth, shared with the makepkg conf. Sourced first because build_deps.sh /
         # setup_zig_env read these directly outside makepkg (the darwin conf doesn't
         # reach them) and the deps path below derives from ZIG_TARGET.
@@ -60,7 +60,7 @@ case "$TARGET" in
         # Forward the darwin makepkg config to build_pkg (both the --packagelist dry-run
         # and the real build) so CARCH=arm64/PKGEXT=.zst are in effect and skip-detection
         # names match.
-        export _MSYS_CROSS_MAKEPKG_CONFIG="$SCRIPTS_DIR/makepkg-darwin-arm64.conf"
+        export MSYS_CROSS_MAKEPKG_CONFIG="$SCRIPTS_DIR/makepkg-darwin-arm64.conf"
         MAKEPKG_ARGS="-fCd --skippgpcheck --nocheck --ignorearch"
         BUILD_CLANG=false
         DB_NAME="msys-cross-darwin"
@@ -128,7 +128,7 @@ bash "$SCRIPTS_DIR/prepare-zig.sh"
 # gcc.exe per target) AND, when wine is present, generates the wine specs-helpers into
 # $BOOTSTRAP_PREFIX/specs-helper/bin (used as GCC_FOR_TARGET by the darwin GCC PKGBUILDs).
 # Since wine is now in the union host list, specs-helper is created on BOTH targets; the
-# darwin GCC build consumes it (_MSYS_CROSS_DUMPSPECS=1), linux ignores it (var unset).
+# darwin GCC build consumes it (MSYS_CROSS_DUMPSPECS=1), linux ignores it (var unset).
 echo ""
 echo "===== Step 2: Prepare build sysroots ====="
 bash "$SCRIPTS_DIR/prepare-build-sysroot.sh"
@@ -176,13 +176,13 @@ install_local "msys-cross-pkgconfig-*.pkg.tar.*"
 
 # Binutils (GCC needs as/ld in PATH). One makepkg run per target so each gets its
 # own per-target -debug package (msys-cross-<target>-binutils-debug); the shared
-# binutils-common rides the mingw64 run. _MSYS_CROSS_TARGET is exported for the
+# binutils-common rides the mingw64 run. MSYS_CROSS_TARGET is exported for the
 # whole iteration (build_pkg + run_as_builduser pick it up); unset after the loop.
 for _t in mingw64 mingw32 ucrt64 cygwin; do
-    export _MSYS_CROSS_TARGET="$_t"
+    export MSYS_CROSS_TARGET="$_t"
     build_pkg "msys-cross-binutils" "$MAKEPKG_ARGS"
 done
-unset _MSYS_CROSS_TARGET
+unset MSYS_CROSS_TARGET
 
 install_local "msys-cross-binutils-common-*.pkg.tar.*"
 install_local "msys-cross-mingw64-binutils-*.pkg.tar.*"
@@ -195,10 +195,10 @@ install_local "msys-cross-cygwin-binutils-*.pkg.tar.*"
 # sub-packages share that one -debug. mingw32 has no fortran sub-package. On darwin the
 # GCC specs/self-test use the wine specs-helper (all-gcc never executes target as/ld).
 for _t in mingw64 mingw32 ucrt64; do
-    export _MSYS_CROSS_TARGET="$_t"
+    export MSYS_CROSS_TARGET="$_t"
     build_pkg "msys-cross-gcc" "$MAKEPKG_ARGS"
 done
-unset _MSYS_CROSS_TARGET
+unset MSYS_CROSS_TARGET
 
 install_local "msys-cross-mingw64-gcc-*.pkg.tar.*"
 install_local "msys-cross-mingw32-gcc-*.pkg.tar.*"

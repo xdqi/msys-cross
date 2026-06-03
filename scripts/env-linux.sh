@@ -7,7 +7,7 @@
 # through `runuser` (exported vars survive; only PATH is reset) and the makepkg
 # `--config` -> build() boundary.
 export ZIG_TARGET="x86_64-linux-gnu.2.11"
-export _MSYS_CROSS_HOST="x86_64-linux-gnu"
-export _MSYS_CROSS_BUILD="x86_64-linux-gnu"
-# _MSYS_CROSS_DUMPSPECS intentionally UNSET on linux (native xgcc runs directly).
+export MSYS_CROSS_HOST="x86_64-linux-gnu"
+export MSYS_CROSS_BUILD="x86_64-linux-gnu"
+# MSYS_CROSS_DUMPSPECS intentionally UNSET on linux (native xgcc runs directly).
 export MSYS_CROSS_ENV_LOADED=1   # guard marker — consumers assert this was sourced

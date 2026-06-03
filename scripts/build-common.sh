@@ -5,7 +5,7 @@
 # (PKGDEST/SRCDEST/LOGDEST/DEPS/DEPS_INSTALL/BOOTSTRAP_PREFIX/INSTALL_PREFIX/
 # ZIG_PATH/DEPS_CACHE/JOBS) — both entrypoints export these before sourcing, with
 # their own values (the darwin entrypoint points PKGDEST/DEPS at darwin-specific
-# dirs). Optional: _MSYS_CROSS_MAKEPKG_CONFIG names a makepkg --config file forwarded
+# dirs). Optional: MSYS_CROSS_MAKEPKG_CONFIG names a makepkg --config file forwarded
 # to every makepkg invocation (the darwin pass uses makepkg-darwin-arm64.conf; the
 # linux pass leaves it unset → unchanged behavior).
 
@@ -15,36 +15,36 @@
 run_as_builduser() {
     chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" 2>/dev/null || true
     # runuser preserves exported env and resets only PATH (util-linux 2.42.1, verified
-    # in the arch build container). All build vars (ZIG_TARGET, _MSYS_CROSS_*, DEPS*,
+    # in the arch build container). All build vars (ZIG_TARGET, MSYS_CROSS_*, DEPS*,
     # PKGDEST…, SCCACHE_* from $GITHUB_ENV, JOBS) are already exported, so they ride
     # through; we re-assert only PATH (which runuser DOES reset to a secure default).
     runuser -w PATH -u builduser -- env PATH="$PATH" "$@"
 }
 
 # build_pkg <pkg-dir> [makepkg-args]
-# Builds one PKGBUILD as builduser. If _MSYS_CROSS_MAKEPKG_CONFIG is set, --config is
+# Builds one PKGBUILD as builduser. If MSYS_CROSS_MAKEPKG_CONFIG is set, --config is
 # passed to BOTH the --packagelist dry-run and the real build (so skip-detection sees
 # the right CARCH/PKGEXT → correct output names; otherwise the dry-run predicts the
 # wrong names and skip-detection never fires — harmless but the build always re-runs).
 build_pkg() {
     local pkg_dir="$1" makepkg_args="${2:--fCd --skippgpcheck}"
     local cfg_args=()
-    [ -n "${_MSYS_CROSS_MAKEPKG_CONFIG:-}" ] && cfg_args=(--config "$_MSYS_CROSS_MAKEPKG_CONFIG")
+    [ -n "${MSYS_CROSS_MAKEPKG_CONFIG:-}" ] && cfg_args=(--config "$MSYS_CROSS_MAKEPKG_CONFIG")
 
     # Set up build directories (needed for --packagelist dry-run and actual build).
-    # Per-target packages (gcc/binutils, selected by _MSYS_CROSS_TARGET) get a
+    # Per-target packages (gcc/binutils, selected by MSYS_CROSS_TARGET) get a
     # target-suffixed BUILDDIR so the per-target build trees don't collide and the
     # post-build `rm -rf "$BUILDDIR"` reclaims each target's tree independently.
-    export BUILDDIR="$PROJECT_ROOT/build/$pkg_dir${_MSYS_CROSS_TARGET:+-$_MSYS_CROSS_TARGET}"
+    export BUILDDIR="$PROJECT_ROOT/build/$pkg_dir${MSYS_CROSS_TARGET:+-$MSYS_CROSS_TARGET}"
     mkdir -p "$BUILDDIR" "$PKGDEST" "$SRCDEST" "$LOGDEST"
     chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST"
 
     # Compute expected output packages via makepkg --packagelist (dry-run). Forward
-    # _MSYS_CROSS_TARGET (runuser scrubs env) so the dry-run names match the build.
+    # MSYS_CROSS_TARGET (runuser scrubs env) so the dry-run names match the build.
     # With a darwin --config, the conf supplies CARCH/PKGEXT so the names match too.
     local pkglist
     pkglist=$(cd "$PROJECT_ROOT/pkgs/$pkg_dir" && runuser -u builduser -- env \
-                ${_MSYS_CROSS_TARGET:+_MSYS_CROSS_TARGET="$_MSYS_CROSS_TARGET"} \
+                ${MSYS_CROSS_TARGET:+MSYS_CROSS_TARGET="$MSYS_CROSS_TARGET"} \
                 makepkg "${cfg_args[@]}" --packagelist 2>/dev/null) || true
 
     # Skip if all expected packages already exist

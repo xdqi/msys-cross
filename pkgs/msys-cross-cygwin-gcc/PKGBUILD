@@ -22,7 +22,7 @@ eval "$(declare -f _msys2_build | sed \
     -e '/CXXFLAGS=\${CXXFLAGS\/-pipe\/}/d' \
     -e "/export lt_cv_deplibs_check_method='pass_all'/d" \
     -e '/export MSYSTEM=CYGWIN/d' \
-    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD}" --host="${_MSYS_CROSS_HOST}" --target=x86_64-pc-cygwin|' \
+    -e 's|--build=\${CHOST}|--build="${MSYS_CROSS_BUILD}" --host="${MSYS_CROSS_HOST}" --target=x86_64-pc-cygwin|' \
     -e 's|--prefix=/usr|--prefix="${_stage_prefix}"|' \
     -e 's|--libexecdir=/usr/lib|--libexecdir="${_stage_prefix}/libexec"|' \
     -e 's|--enable-bootstrap|--disable-bootstrap|' \
@@ -137,10 +137,10 @@ build() {
     # GCC_FOR_TARGET to the build-runnable x86_64-pc-cygwin gcc driver that
     # prepare-build-sysroot.sh placed in $_bootstrap_prefix/specs-helper/bin (a fixed
     # path, NOT on PATH). Single make, no reconfigure. (Mirrors the mingw msys-cross-gcc.)
-    if [ "${_MSYS_CROSS_DUMPSPECS:-0}" = 1 ]; then
-        export _MSYS_CROSS_SPECS_GCC="${_bootstrap_prefix}/specs-helper/bin/x86_64-pc-cygwin-gcc"
-        if [ ! -x "$_MSYS_CROSS_SPECS_GCC" ]; then
-            echo "ERROR: specs-helper gcc not found: $_MSYS_CROSS_SPECS_GCC" >&2
+    if [ "${MSYS_CROSS_DUMPSPECS:-0}" = 1 ]; then
+        export _specs_gcc="${_bootstrap_prefix}/specs-helper/bin/x86_64-pc-cygwin-gcc"
+        if [ ! -x "$_specs_gcc" ]; then
+            echo "ERROR: specs-helper gcc not found: $_specs_gcc" >&2
             echo "       run prepare-build-sysroot.sh first (it fetches msys-cross-cygwin-gcc)." >&2
             return 1
         fi
@@ -148,7 +148,7 @@ build() {
         # xgcc: the specs dump and the host self-tests. The helper carries its own cc1/cc1plus,
         # so -dumpspecs emits identical target specs and -fself-test no-ops. (Mirrors msys-cross-gcc.)
         eval "$(declare -f _msys2_build | sed \
-            -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_MSYS_CROSS_SPECS_GCC}" all-gcc#')"
+            -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_specs_gcc}" all-gcc#')"
     fi
 
     _msys2_build

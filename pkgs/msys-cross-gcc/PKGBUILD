@@ -10,8 +10,8 @@ inherit_msys2 "mingw-w64-cross-gcc"
 eval "$(declare -f _build | sed \
     -e 's|--prefix=/opt|--prefix="${_stage_prefix}"|g' \
     -e 's|--libexecdir=/opt/lib|--libexecdir="${_stage_prefix}/libexec"|g' \
-    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD}"|' \
-    -e 's|--host=\${CHOST}|--host="${_MSYS_CROSS_HOST}"|' \
+    -e 's|--build=\${CHOST}|--build="${MSYS_CROSS_BUILD}"|' \
+    -e 's|--host=\${CHOST}|--host="${MSYS_CROSS_HOST}"|' \
     -e 's|--with-{gmp,mpfr,mpc,isl}=/usr|--with-gmp='"$_deps"' --with-mpfr='"$_deps"' --with-mpc='"$_deps"' --with-isl='"$_deps"'|g' \
     -e 's|--enable-libgomp|--disable-libcc1 --enable-libgomp|g' \
     -e 's| fortran|,fortran|g' \
@@ -34,7 +34,7 @@ _our_pkgrel=1
 pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 
 # ---- Single-target build (one target per makepkg run) ----
-# _MSYS_CROSS_TARGET selects exactly ONE target subdir: mingw64 | mingw32 | ucrt64.
+# MSYS_CROSS_TARGET selects exactly ONE target subdir: mingw64 | mingw32 | ucrt64.
 # Default mingw64 so a bare `makepkg` / `makepkg --packagelist` is well-defined;
 # scripts/build.sh sets it explicitly once per target. The single value is the
 # lever for per-target DEBUG packages: pkgbase is set to this target's gcc package
@@ -42,10 +42,10 @@ pkgrel="${_msys2_pkgrel}.${_our_pkgrel}"
 # msys-cross-<target>-gcc-debug (makepkg hardcodes the debug pkg name to
 # $pkgbase-debug, with no override variable — so per-target debug REQUIRES a
 # per-target pkgbase, i.e. one target per run).
-_mct="${_MSYS_CROSS_TARGET:-mingw64}"
+_mct="${MSYS_CROSS_TARGET:-mingw64}"
 case "$_mct" in
     mingw64|mingw32|ucrt64) ;;
-    *) echo "ERROR: _MSYS_CROSS_TARGET must be one of mingw64|mingw32|ucrt64 (got '$_mct')" >&2
+    *) echo "ERROR: MSYS_CROSS_TARGET must be one of mingw64|mingw32|ucrt64 (got '$_mct')" >&2
        return 1 2>/dev/null || exit 1 ;;
 esac
 
@@ -139,16 +139,16 @@ build() {
     # specs depend ONLY on the target, so we override GCC_FOR_TARGET for this one make to
     # a build-runnable SAME-target gcc: the repo's own x86_64-linux-hosted
     # msys-cross-<target>-gcc (PER TARGET — each target has its own specs). Single make,
-    # no reconfigure. _MSYS_CROSS_DUMPSPECS=1 enables it; unset = native build, unchanged.
-    if [ "${_MSYS_CROSS_DUMPSPECS:-0}" = 1 ]; then
+    # no reconfigure. MSYS_CROSS_DUMPSPECS=1 enables it; unset = native build, unchanged.
+    if [ "${MSYS_CROSS_DUMPSPECS:-0}" = 1 ]; then
         # Build-runnable SAME-target gcc, used only to generate the target `specs` (see
         # below). prepare-build-sysroot.sh pulls msys-cross-<target>-gcc from the
         # msys-cross repo into $_bootstrap_prefix/specs-helper (a fixed path that is
         # deliberately NOT on PATH, so it can never shadow the cross toolchain). We point
         # at it by absolute path — no `command -v`, no dependence on build order/PATH.
-        export _MSYS_CROSS_SPECS_GCC="${_bootstrap_prefix}/specs-helper/bin/${_t}-gcc"
-        if [ ! -x "$_MSYS_CROSS_SPECS_GCC" ]; then
-            echo "ERROR: specs-helper gcc not found: $_MSYS_CROSS_SPECS_GCC" >&2
+        export _specs_gcc="${_bootstrap_prefix}/specs-helper/bin/${_t}-gcc"
+        if [ ! -x "$_specs_gcc" ]; then
+            echo "ERROR: specs-helper gcc not found: $_specs_gcc" >&2
             echo "       run prepare-build-sysroot.sh first (it installs msys-cross-<target>-gcc)." >&2
             return 1
         fi
@@ -161,7 +161,7 @@ build() {
         # them: -dumpspecs emits identical specs, and -fself-test no-ops ("self-tests are not
         # enabled in this build") because the helper carries its own cc1/cc1plus backends.
         eval "$(declare -f _build | sed \
-            -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_MSYS_CROSS_SPECS_GCC}" all-gcc#')"
+            -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_specs_gcc}" all-gcc#')"
     fi
     _msys2_build
 }
