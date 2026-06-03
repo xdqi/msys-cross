@@ -1,92 +1,167 @@
 # Maintainer: msys2-cross project
 _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_project_root="$(cd "$_startdir/../.." && pwd)"
+source "$_project_root/scripts/msys-cross-common.sh"
+
+# msys-cross-clang: a from-source clang+lld cross toolchain that runs on the build host
+# (Linux) and produces Windows PE, reusing the OFFICIAL mingw-w64-clang-* runtime
+# libraries (libc++/crt/headers) as the target sysroot — no per-target compiler.
+#
+# clang is a single driver: ONE clang+lld serves every Windows target via -target /
+# --sysroot. So the heavy LLVM binaries live in ONE package (msys-cross-clang), kept
+# under libexec/ (off PATH, so a bare `clang`/`ld` never shadows the host toolchain),
+# and thin per-abi wrapper packages (clang64 / clangarm64) expose
+# bin/<triple>-<tool> symlinks + a static cfg, depending on the official runtime.
+#
+# Built from source by cross-compiling LLVM with zig cc (the same toolchain as
+# msys-cross-gcc/binutils). The old-glibc C++17 aligned-new fix is already baked into
+# the zig install by scripts/prepare-zig.sh, so no compat object / macro is needed here.
+
+# Version follows upstream: the single source of truth is the mingw-w64-llvm package in
+# the MINGW-packages submodule (the clang64-repo mainline LLVM, same version as the
+# official mingw-w64-clang-x86_64-libc++ runtime we link against). Grep the literal — do
+# NOT source that PKGBUILD; it carries mingw-specific pkgname/depends logic we don't want.
+_llvm_pkgbuild="$_project_root/deps/MINGW-packages/mingw-w64-llvm/PKGBUILD"
+_pkgver=$(grep '^_pkgver=' "$_llvm_pkgbuild" | head -1 | cut -d= -f2)
 
 pkgbase=msys-cross-clang
-pkgname=(
-    msys-cross-clang-common
-    msys-cross-clang64
-    msys-cross-clangarm64
-)
-pkgver=1.0
+pkgname=(msys-cross-clang msys-cross-clang64 msys-cross-clangarm64)
+pkgver=$_pkgver
 pkgrel=1
 arch=('x86_64')
-options=('!strip')
-url='https://github.com/'
+url='https://llvm.org/'
+license=('Apache-2.0 WITH LLVM-exception')
+makedepends=(cmake ninja python llvm)   # llvm => host llvm-tblgen for the cross build
 
-source=(
-    'wrapper.in'
-    'configure-host.in'
-    'clang64.cfg.in'
-    'clangarm64.cfg.in'
-)
+_resver="${_pkgver%%.*}"          # clang resource-dir version = LLVM major (lib/clang/<major>)
+_srcname="llvm-project-${_pkgver}.src"
+_blddir="build-cross"
+
+source=("file://$_startdir/wrapper.in"
+        "file://$_startdir/clang64.cfg"
+        "file://$_startdir/clangarm64.cfg"
+        "llvm-project-${_pkgver}.src.tar.xz::https://github.com/llvm/llvm-project/releases/download/llvmorg-${_pkgver}/llvm-project-${_pkgver}.src.tar.xz")
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+noextract=("llvm-project-${_pkgver}.src.tar.xz")   # 167MB → ~2GB; extracted in build()
 
-# Tools dispatched by wrapper.in (must match its case-statement)
-_tools=(clang clang++ cc c++ cpp as ld ar ranlib strip nm objdump objcopy readobj dlltool windres rc)
+# Tools the wrapper dispatches to (installed into libexec from the build tree).
+_llvmtools=(ar ranlib nm strip objcopy objdump readobj dlltool rc cxxfilt size)
+# bin/<triple>-<tool> symlinks each wrapper package creates.
+_wraptools=(clang clang++ cc c++ cpp as ld ar ranlib strip nm objdump objcopy readobj dlltool windres rc)
 
-_install_common_files() {
-    install -d "$pkgdir/libexec/msys-cross-clang"
-    install -m644 "$srcdir/wrapper.in"        "$pkgdir/libexec/msys-cross-clang/wrapper.in"
-    install -m755 "$srcdir/configure-host.in" "$pkgdir/libexec/msys-cross-clang/configure-host"
+build() {
+    # Same zig-cc cross toolchain as msys-cross-gcc/binutils. setup_zig_env exports
+    # CC=zigcc / CXX=zigc++ / AR / RANLIB / CFLAGS / CXXFLAGS / LDFLAGS and prepends the
+    # zig + install-prefix dirs to PATH. The zig at build/zig is already patched for
+    # old-glibc aligned-new by prepare-zig.sh (build.sh Step 1). ZIG_TARGET is left at its
+    # x86_64-linux-gnu.2.11 default (zig-common.sh) like the gcc/binutils builds.
+    setup_zig_env
 
-    install -d "$pkgdir/bin"
-    ln -sf ../libexec/msys-cross-clang/configure-host "$pkgdir/bin/msys-cross-clang-configure"
+    cd "$srcdir"
+    [ -d "$_srcname" ] || tar xf "llvm-project-${_pkgver}.src.tar.xz"
+
+    # Bare upstream LLVM (no MSYS2/MINGW patches — all are cygwin-only / test-only /
+    # already-upstream, or GCC-interop overrides official clang64 itself omits). No align
+    # compat object: zig's libc++ is already patched. All backends, to match the official
+    # mingw-w64-llvm clang-repo build.
+    #
+    # zstd/zlib ENABLED, but pinned to the deps prefix's STATIC libs (libz.a/libzstd.a,
+    # GLIBC ≤ 2.2.5). Without the explicit ZLIB_LIBRARY/zstd_LIBRARY, cmake's find_package
+    # would pick up the build host's /usr/lib/libz.so / libzstd.so — a NEW-glibc dynamic
+    # lib that would break this clang's old-glibc (≤ 2.11) portability. Pin them.
+    #
+    # LLVM_PARALLEL_LINK_JOBS=1: with all backends, the final clang-22 and lld are each
+    # multi-GB link jobs; linking them in parallel exhausts RAM+swap and the linker is
+    # OOM-killed (SIGABRT). Serialize the link step (compile stays fully parallel).
+    rm -rf "$_blddir"
+    cmake -G Ninja -S "$_srcname/llvm" -B "$_blddir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_ENABLE_PROJECTS="clang;lld" \
+        -DLLVM_TARGETS_TO_BUILD="all" \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_CXX_COMPILER="$CXX" \
+        -DCMAKE_CROSSCOMPILING=ON \
+        -DLLVM_HOST_TRIPLE="x86_64-linux-gnu" \
+        -DLLVM_TABLEGEN="$(command -v llvm-tblgen)" \
+        -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+        -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
+        -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF \
+        -DLLVM_ENABLE_ZLIB=ON  -DZLIB_INCLUDE_DIR="$_deps/include" -DZLIB_LIBRARY="$_deps/lib/libz.a" \
+        -DLLVM_ENABLE_ZSTD=ON  -DLLVM_USE_STATIC_ZSTD=TRUE \
+        -Dzstd_INCLUDE_DIR="$_deps/include" -Dzstd_LIBRARY="$_deps/lib/libzstd.a" \
+        -DLLVM_PARALLEL_LINK_JOBS=1 \
+        -Wno-dev
+
+    # REAL ninja targets only: llvm-strip(→objcopy), llvm-ranlib/llvm-dlltool(→ar) are
+    # symlinks created automatically when objcopy/ar build — passing them errors.
+    ninja -C "$_blddir" \
+        clang lld \
+        llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readobj llvm-rc llvm-cxxfilt llvm-size
 }
 
-_install_target_symlinks() {
-    # $1: msystem (clang64 / clangarm64)
-    # $2: chost   (x86_64-w64-mingw32 / aarch64-w64-mingw32)
-    local msystem=$1 chost=$2
-    install -d "$pkgdir/bin"
-    for t in "${_tools[@]}"; do
-        ln -sf ../libexec/msys-cross-clang/wrapper "$pkgdir/bin/${msystem}-${t}"
+package_msys-cross-clang() {
+    pkgdesc="Self-built clang+lld ${pkgver} cross driver (host Linux, targets Windows; off-PATH)"
+    depends=(msys-cross-filesystem)
+
+    local bin="$srcdir/$_blddir/bin"
+    local lx="$pkgdir/libexec/msys-cross-clang"
+    install -d "$lx"
+
+    # The two real binaries (clang-<major>, lld) + the wrapper. clang*/lld* console
+    # aliases are symlinks to these; recreate them in libexec. makepkg strips them.
+    install -m755 "$bin/clang-$_resver" "$lx/clang-$_resver"
+    install -m755 "$bin/lld"            "$lx/lld"
+    ln -sf "clang-$_resver" "$lx/clang"
+    ln -sf "clang-$_resver" "$lx/clang++"
+    ln -sf lld              "$lx/ld.lld"
+
+    # llvm-* binutils (small, independent execs). install dereferences the symlinked
+    # tools (ranlib/strip/dlltool) to standalone binaries.
+    local t
+    for t in "${_llvmtools[@]}"; do
+        install -m755 "$bin/llvm-$t" "$lx/llvm-$t"
     done
-    # Cross-compiler chost-prefixed aliases (matches autotools' AC_CHECK_TOOL).
-    ln -sf "${msystem}-clang"   "$pkgdir/bin/${chost}-clang"
-    ln -sf "${msystem}-clang++" "$pkgdir/bin/${chost}-clang++"
+
+    # clang's own intrinsics resource headers (mm_malloc.h etc.) — referenced by the
+    # cfg via -idirafter; the official compiler-rt package does not ship them.
+    install -d "$lx/lib/clang/$_resver"
+    cp -a "$srcdir/$_blddir/lib/clang/$_resver/include" "$lx/lib/clang/$_resver/"
+
+    # The dispatch wrapper.
+    install -m755 "$srcdir/wrapper.in" "$lx/wrapper"
 }
 
-_install_cfg_template() {
-    # $1: msystem
-    install -d "$pkgdir/etc/clang"
-    install -m644 "$srcdir/$1.cfg.in" "$pkgdir/etc/clang/$1.cfg.in"
-}
-
-package_msys-cross-clang-common() {
-    pkgdesc="Common runtime for msys-cross-clang* (wrapper + configure-host)"
-    depends=('msys-cross-filesystem')
-    _install_common_files
+# Shared layout for the per-abi wrapper packages.
+_install_wrappers() {
+    local triple=$1 cfg=$2 msystem=$3
+    install -d "$pkgdir/bin" "$pkgdir/etc/clang"
+    install -m644 "$srcdir/$cfg" "$pkgdir/etc/clang/$msystem.cfg"
+    local t
+    for t in "${_wraptools[@]}"; do
+        ln -sf "../libexec/msys-cross-clang/wrapper" "$pkgdir/bin/${triple}-${t}"
+    done
 }
 
 package_msys-cross-clang64() {
-    pkgdesc="Cross-compile to x86_64-w64-mingw32 (clang64) using host clang/lld"
-    depends=(
-        "msys-cross-clang-common=${pkgver}-${pkgrel}"
-        # MSYS2 sysroot bits (installed under $PREFIX/clang64/...)
-        'mingw-w64-clang-x86_64-headers-git'
-        'mingw-w64-clang-x86_64-crt-git'
-        'mingw-w64-clang-x86_64-compiler-rt'
-        'mingw-w64-clang-x86_64-libc++'
-        'mingw-w64-clang-x86_64-libunwind'
-        'mingw-w64-clang-x86_64-winpthreads-git'
-    )
-    install=msys-cross-clang64.install
-    _install_target_symlinks clang64 x86_64-w64-mingw32
-    _install_cfg_template    clang64
+    pkgdesc="Cross clang for x86_64-w64-mingw32 (UCRT) using the self-built driver + official clang64 runtime"
+    depends=("msys-cross-clang=${pkgver}-${pkgrel}"
+             mingw-w64-clang-x86_64-headers
+             mingw-w64-clang-x86_64-crt
+             mingw-w64-clang-x86_64-libc++
+             mingw-w64-clang-x86_64-libunwind
+             mingw-w64-clang-x86_64-compiler-rt
+             mingw-w64-clang-x86_64-winpthreads)
+    _install_wrappers x86_64-w64-mingw32 clang64.cfg clang64
 }
 
 package_msys-cross-clangarm64() {
-    pkgdesc="Cross-compile to aarch64-w64-mingw32 (clangarm64) using host clang/lld"
-    depends=(
-        "msys-cross-clang-common=${pkgver}-${pkgrel}"
-        'mingw-w64-clang-aarch64-headers-git'
-        'mingw-w64-clang-aarch64-crt-git'
-        'mingw-w64-clang-aarch64-compiler-rt'
-        'mingw-w64-clang-aarch64-libc++'
-        'mingw-w64-clang-aarch64-libunwind'
-        'mingw-w64-clang-aarch64-winpthreads-git'
-    )
-    install=msys-cross-clangarm64.install
-    _install_target_symlinks clangarm64 aarch64-w64-mingw32
-    _install_cfg_template    clangarm64
+    pkgdesc="Cross clang for aarch64-w64-mingw32 (UCRT) using the self-built driver + official clangarm64 runtime"
+    depends=("msys-cross-clang=${pkgver}-${pkgrel}"
+             mingw-w64-clang-aarch64-headers
+             mingw-w64-clang-aarch64-crt
+             mingw-w64-clang-aarch64-libc++
+             mingw-w64-clang-aarch64-libunwind
+             mingw-w64-clang-aarch64-compiler-rt
+             mingw-w64-clang-aarch64-winpthreads)
+    _install_wrappers aarch64-w64-mingw32 clangarm64.cfg clangarm64
 }

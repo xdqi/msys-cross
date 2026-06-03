@@ -1,8 +1,0 @@
-post_install() {
-    msys-cross-clang-configure clang64 || \
-        echo "msys-cross-clang64: configure step failed (run msys-cross-clang-configure clang64 manually)" >&2
-}
-
-post_upgrade() {
-    post_install
-}

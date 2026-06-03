@@ -1,8 +1,0 @@
-post_install() {
-    msys-cross-clang-configure clangarm64 || \
-        echo "msys-cross-clangarm64: configure step failed (run msys-cross-clang-configure clangarm64 manually)" >&2
-}
-
-post_upgrade() {
-    post_install
-}

@@ -1,97 +1,74 @@
 #!/bin/sh
-# msys-cross-clang wrapper
-# Dispatches to host clang/lld/llvm-* based on argv[0].
-# @CLANG_BIN@, @LLD_BIN@, @LLVM_TOOLDIR@ get filled by configure-host.
+# msys-cross-clang wrapper — dispatches to the SELF-BUILT clang/lld/llvm-* shipped
+# under libexec/msys-cross-clang/ (kept off PATH so a bare `clang`/`ld` never shadows
+# the host toolchain). The wrapper is invoked through a bin/<triple>-<tool> symlink.
+#
+# Driver tools (clang/clang++/cc/c++/cpp/as) cross-compile to the msystem's Windows
+# target by feeding the static etc/clang/<msystem>.cfg, PLUS a runtime-resolved
+# -resource-dir that points at the OFFICIAL clang64/clangarm64 compiler-rt (its LLVM
+# version is independent of ours and a .cfg can't glob, so we resolve it here).
 set -e
 
 SELF="${0##*/}"
-# $0 is the bin/<msystem>-<tool> symlink; PREFIX is its parent's parent.
-HERE="$(cd "$(dirname "$0")" && pwd)"
-PREFIX="$(cd "$HERE/.." && pwd)"
+# $0 is the bin/<triple>-<tool> symlink -> ../libexec/msys-cross-clang/wrapper.
+# Resolve the symlink so HERE is the real libexec dir, PREFIX two levels up.
+REAL="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+HERE="$(cd "$(dirname "$REAL")" && pwd)"        # <prefix>/libexec/msys-cross-clang
+PREFIX="$(cd "$HERE/../.." && pwd)"             # <prefix>
 
-# Parse "<msystem>-<tool>" or "<chost>-clang[++]"
+# Map "<triple>-<tool>" -> MSYSTEM (clang64/clangarm64) + TOOL.
 case "$SELF" in
-    clang64-*)
-        MSYSTEM=clang64
-        TOOL="${SELF#clang64-}"
-        ;;
-    clangarm64-*)
-        MSYSTEM=clangarm64
-        TOOL="${SELF#clangarm64-}"
-        ;;
-    x86_64-w64-mingw32-clang++)
-        MSYSTEM=clang64; TOOL=clang++ ;;
-    x86_64-w64-mingw32-clang)
-        MSYSTEM=clang64; TOOL=clang ;;
-    aarch64-w64-mingw32-clang++)
-        MSYSTEM=clangarm64; TOOL=clang++ ;;
-    aarch64-w64-mingw32-clang)
-        MSYSTEM=clangarm64; TOOL=clang ;;
-    *)
-        echo "msys-cross-clang wrapper: unknown invocation '$SELF'" >&2
-        exit 1
-        ;;
+    x86_64-w64-mingw32-*)   MSYSTEM=clang64;     TOOL="${SELF#x86_64-w64-mingw32-}" ;;
+    aarch64-w64-mingw32-*)  MSYSTEM=clangarm64;  TOOL="${SELF#aarch64-w64-mingw32-}" ;;
+    *) echo "msys-cross-clang: unknown invocation '$SELF'" >&2; exit 1 ;;
 esac
 
+CLANG_BIN="$HERE/clang"
+LLD_BIN="$HERE/lld"
 CFG="$PREFIX/etc/clang/$MSYSTEM.cfg"
+SR="$PREFIX/$MSYSTEM"                           # official sysroot (clang64 / clangarm64)
 
-# Substituted by configure-host:
-CLANG_BIN="@CLANG_BIN@"
-LLD_BIN="@LLD_BIN@"
-LLVM_TOOLDIR="@LLVM_TOOLDIR@"
-LLVM_SUFFIX="@LLVM_SUFFIX@"
+need_cfg() {
+    [ -r "$CFG" ] || { echo "msys-cross-clang: missing config $CFG" >&2; exit 1; }
+}
 
-if [ ! -r "$CFG" ]; then
-    echo "msys-cross-clang: missing config $CFG; run 'msys-cross-clang-configure $MSYSTEM'" >&2
-    exit 1
-fi
+# The official compiler-rt resource dir (builtins) lives at
+# <SR>/opt/llvm-NN/lib/clang/NN — version tracks the installed sysroot, not our clang,
+# and a .cfg cannot glob, so resolve it at run time. Empty if the sysroot isn't installed
+# yet (clang will then error clearly on the missing builtins).
+resolve_resource_dir() {
+    set -- "$SR"/opt/llvm-*/lib/clang/*
+    [ -d "$1" ] && printf '%s' "$1"
+}
+
+run_clang() {
+    need_cfg
+    local rd; rd="$(resolve_resource_dir)"
+    exec "$CLANG_BIN" --config "$CFG" ${rd:+-resource-dir="$rd"} "$@"
+}
 
 llvm_tool() {
-    # $1: base name like 'ar', 'strip'
-    local t="$LLVM_TOOLDIR/llvm-$1$LLVM_SUFFIX"
-    if [ -x "$t" ]; then
-        exec "$t" "$@"
-    fi
-    # Fallback to PATH
-    t="$(command -v "llvm-$1$LLVM_SUFFIX" || command -v "llvm-$1" || true)"
-    if [ -n "$t" ]; then
-        shift
-        exec "$t" "$@"
-    fi
-    echo "msys-cross-clang: llvm-$1 not found" >&2
-    exit 1
+    # $1: base name (ar/ranlib/...). Shift it off before exec so it isn't argv[1].
+    local t="$HERE/llvm-$1"
+    [ -x "$t" ] || { echo "msys-cross-clang: $t not found" >&2; exit 1; }
+    shift
+    exec "$t" "$@"
 }
 
 case "$TOOL" in
-    clang|cc)
-        exec "$CLANG_BIN" --config "$CFG" "$@"
-        ;;
-    clang++|c++|cpp)
-        exec "$CLANG_BIN" --config "$CFG" --driver-mode=g++ "$@"
-        ;;
-    as)
-        # gas-style assembler; clang -c -x assembler is the closest match
-        exec "$CLANG_BIN" --config "$CFG" -c -x assembler "$@"
-        ;;
-    ld)
-        # lld picks MinGW flavor automatically via -m i386pep/i386pe in driver use.
-        # When called as $msystem-ld directly, force MinGW via -flavor gnu and rely on
-        # caller supplying -m. End users normally go through the driver.
-        exec "$LLD_BIN" -flavor gnu "$@"
-        ;;
-    ar)        llvm_tool ar        "$@" ;;
-    ranlib)    llvm_tool ranlib    "$@" ;;
-    strip)     llvm_tool strip     "$@" ;;
-    nm)        llvm_tool nm        "$@" ;;
-    objdump)   llvm_tool objdump   "$@" ;;
-    objcopy)   llvm_tool objcopy   "$@" ;;
-    readobj|readelf)
-               llvm_tool readobj   "$@" ;;
-    dlltool)   llvm_tool dlltool   "$@" ;;
-    windres)   llvm_tool windres   "$@" ;;
-    rc)        llvm_tool rc        "$@" ;;
-    *)
-        echo "msys-cross-clang wrapper: unknown tool '$TOOL'" >&2
-        exit 1
-        ;;
+    clang|cc)          run_clang "$@" ;;
+    clang++|c++|cpp)   run_clang --driver-mode=g++ "$@" ;;
+    as)                run_clang -c -x assembler "$@" ;;
+    ld)                exec "$LLD_BIN" -flavor gnu "$@" ;;
+    ar)                llvm_tool ar       "$@" ;;
+    ranlib)            llvm_tool ranlib   "$@" ;;
+    strip)             llvm_tool strip    "$@" ;;
+    nm)                llvm_tool nm       "$@" ;;
+    objdump)           llvm_tool objdump  "$@" ;;
+    objcopy)           llvm_tool objcopy  "$@" ;;
+    readobj|readelf)   llvm_tool readobj  "$@" ;;
+    dlltool)           llvm_tool dlltool  "$@" ;;
+    windres)           llvm_tool rc       "$@" ;;
+    rc)                llvm_tool rc       "$@" ;;
+    *) echo "msys-cross-clang: unknown tool '$TOOL'" >&2; exit 1 ;;
 esac
