@@ -62,7 +62,11 @@ case "$TARGET" in
         # names match.
         export MSYS_CROSS_MAKEPKG_CONFIG="$SCRIPTS_DIR/makepkg-darwin-arm64.conf"
         MAKEPKG_ARGS="-fCd --skippgpcheck --nocheck --ignorearch"
-        BUILD_CLANG=false
+        # clang IS built for the darwin host: the same from-source PKGBUILD cross-builds
+        # an arm64 Mach-O clang+lld with zig cc (build() branches on ZIG_TARGET for the
+        # Darwin host triple / CMAKE_SYSTEM_NAME). Unlike gcc, clang is a single driver,
+        # so no Canadian-cross specs dance is needed — it just retargets via zig.
+        BUILD_CLANG=true
         DB_NAME="msys-cross-darwin"
         # Installer overrides: darwin pacman.conf (Architecture=arm64, [msys-cross-darwin]
         # -> /repo-darwin) and a darwin-specific output name.
@@ -209,16 +213,20 @@ build_pkg "msys-cross-cygwin-gcc" "$MAKEPKG_ARGS"
 
 install_local "msys-cross-cygwin-gcc-*.pkg.tar.*"
 
-# ---- Step 4b: Clang cross toolchain (linux only) ----
+# ---- Step 4b: Clang cross toolchain (both hosts) ----
 # clang is a single driver: ONE self-built clang+lld serves every Windows target via
 # -target/--sysroot, so one heavy package (msys-cross-clang, binaries off-PATH under
 # libexec/) plus thin per-abi wrapper packages (clang64/clangarm64). LLVM is cross-built
 # from source with zig cc (the patched zig from Step 1 supplies the old-glibc aligned-new
-# fix); the version follows the mingw-w64-llvm submodule. Not built for the darwin host.
+# fix); the version follows the mingw-w64-llvm submodule. Unlike gcc/binutils there is no
+# Canadian-cross specs step — the driver simply retargets — so the SAME PKGBUILD builds it
+# for the linux host (x86_64 ELF) and the darwin host (arm64 Mach-O); build() branches on
+# ZIG_TARGET. $MAKEPKG_ARGS carries the per-target makepkg flags (darwin: --ignorearch +
+# the darwin --config via MSYS_CROSS_MAKEPKG_CONFIG); linux leaves it empty for the default.
 if $BUILD_CLANG; then
     echo ""
     echo "===== Step 4b: Clang cross toolchain ====="
-    build_pkg "msys-cross-clang"   # builds all three split packages (pkgbase=msys-cross-clang)
+    build_pkg "msys-cross-clang" "$MAKEPKG_ARGS"  # all three split packages (pkgbase=msys-cross-clang)
     install_local "msys-cross-clang-*.pkg.tar.*"
 fi
 

@@ -4,8 +4,8 @@ _project_root="$(cd "$_startdir/../.." && pwd)"
 source "$_project_root/scripts/msys-cross-common.sh"
 
 # msys-cross-clang: a from-source clang+lld cross toolchain that runs on the build host
-# (Linux) and produces Windows PE, reusing the OFFICIAL mingw-w64-clang-* runtime
-# libraries (libc++/crt/headers) as the target sysroot — no per-target compiler.
+# and produces Windows PE, reusing the OFFICIAL mingw-w64-clang-* runtime libraries
+# (libc++/crt/headers) as the target sysroot — no per-target compiler.
 #
 # clang is a single driver: ONE clang+lld serves every Windows target via -target /
 # --sysroot. So the heavy LLVM binaries live in ONE package (msys-cross-clang), kept
@@ -14,8 +14,11 @@ source "$_project_root/scripts/msys-cross-common.sh"
 # bin/<triple>-<tool> symlinks + a static cfg, depending on the official runtime.
 #
 # Built from source by cross-compiling LLVM with zig cc (the same toolchain as
-# msys-cross-gcc/binutils). The old-glibc C++17 aligned-new fix is already baked into
-# the zig install by scripts/prepare-zig.sh, so no compat object / macro is needed here.
+# msys-cross-gcc/binutils), so the SAME PKGBUILD produces the driver for either host:
+# x86_64 Linux (ZIG_TARGET=x86_64-linux-gnu.2.11) or arm64 macOS 11.0
+# (ZIG_TARGET=aarch64-macos.11.0) — build() branches on ZIG_TARGET / MSYS_CROSS_HOST.
+# The old-glibc C++17 aligned-new fix is already baked into the zig install by
+# scripts/prepare-zig.sh, so no compat object / macro is needed here.
 
 # Version follows upstream: the single source of truth is the mingw-w64-llvm package in
 # the MINGW-packages submodule (the clang64-repo mainline LLVM, same version as the
@@ -54,9 +57,11 @@ _wraptools=(clang clang++ cc c++ cpp as ld ar ranlib strip nm objdump objcopy re
 build() {
     # Same zig-cc cross toolchain as msys-cross-gcc/binutils. setup_zig_env exports
     # CC=zigcc / CXX=zigc++ / AR / RANLIB / CFLAGS / CXXFLAGS / LDFLAGS and prepends the
-    # zig + install-prefix dirs to PATH. The zig at build/zig is already patched for
-    # old-glibc aligned-new by prepare-zig.sh (build.sh Step 1). ZIG_TARGET is left at its
-    # x86_64-linux-gnu.2.11 default (zig-common.sh) like the gcc/binutils builds.
+    # zig + install-prefix dirs to PATH, all keyed on ZIG_TARGET (set by env-$TARGET.sh:
+    # x86_64-linux-gnu.2.11 for the linux host, aarch64-macos.11.0 for the darwin host —
+    # setup_zig_env already swaps AR to --format=darwin and drops the GNU -Bstatic LDFLAGS
+    # on macOS). The zig at build/zig is already patched for old-glibc aligned-new by
+    # prepare-zig.sh (build.sh Step 1).
     setup_zig_env
 
     cd "$srcdir"
@@ -75,6 +80,16 @@ build() {
     # LLVM_PARALLEL_LINK_JOBS=1: with all backends, the final clang-22 and lld are each
     # multi-GB link jobs; linking them in parallel exhausts RAM+swap and the linker is
     # OOM-killed (SIGABRT). Serialize the link step (compile stays fully parallel).
+    #
+    # HOST triple comes from MSYS_CROSS_HOST (same source binutils/gcc use for --host):
+    # x86_64-linux-gnu for the native linux build, aarch64-apple-darwin* for the darwin
+    # host. On a macOS host we also set CMAKE_SYSTEM_NAME=Darwin so cmake selects Mach-O
+    # conventions (framework probes, no -Bsymbolic, the NATIVE cross-tablegen sub-build);
+    # on linux it must stay unset (setting it to Linux would still trip the same probes).
+    local _cmake_extra=()
+    case "$ZIG_TARGET" in
+        *macos*|*darwin*) _cmake_extra+=(-DCMAKE_SYSTEM_NAME=Darwin) ;;
+    esac
     rm -rf "$_blddir"
     cmake -G Ninja -S "$_srcname/llvm" -B "$_blddir" \
         -DCMAKE_BUILD_TYPE=Release \
@@ -83,8 +98,9 @@ build() {
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
         -DCMAKE_CROSSCOMPILING=ON \
-        -DLLVM_HOST_TRIPLE="x86_64-linux-gnu" \
+        -DLLVM_HOST_TRIPLE="$MSYS_CROSS_HOST" \
         -DLLVM_TABLEGEN="$(command -v llvm-tblgen)" \
+        "${_cmake_extra[@]}" \
         -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
         -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
         -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF \
