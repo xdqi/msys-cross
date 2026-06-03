@@ -8,6 +8,24 @@ source "$_startdir/../../scripts/msys-cross-common.sh"
 # gpgme, libseccomp, ...) from source.
 inherit_aur "pacman-static"
 
+# ---- Drop the zlib + zstd source downloads (we reuse build_deps' prebuilt libs) ----
+# build() below seeds $srcdir/temp/usr with build_deps' static libz.a/libzstd.a and
+# awk-removes the AUR build()'s zlib/zstd compile blocks, so the upstream zlib/zstd
+# tarballs are downloaded but never used. Worse, the AUR's zlib source is a single
+# https://zlib.net/ URL with no mirror fallback, and zlib.net intermittently returns
+# HTTP 415 to CI runners — failing the whole package on a download we don't need.
+# Rebuild source[]/sha512sums[] in lockstep, skipping the zlib (zlib.net) and zstd
+# (facebook/zstd release) entries and their detached-signature siblings (.asc/.sig).
+_keep_src=(); _keep_sums=()
+for _i in "${!source[@]}"; do
+    case "${source[$_i]}" in
+        *zlib.net/*|*facebook/zstd/releases/*) ;;   # drop tarball + its .asc/.sig
+        *) _keep_src+=("${source[$_i]}"); _keep_sums+=("${sha512sums[$_i]}") ;;
+    esac
+done
+source=("${_keep_src[@]}"); sha512sums=("${_keep_sums[@]}")
+unset _i _keep_src _keep_sums
+
 # ---- Package metadata (override the inherited AUR identity) ----
 pkgname=msys-cross-pacman
 pkgdesc="Static, source-patched pacman (non-root) + wrapper for msys2-cross bootstrap"
