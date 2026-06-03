@@ -85,5 +85,10 @@ install_local() {
     local pattern="$1"
     echo "--- Installing $pattern ---"
     mkdir -p "$INSTALL_PREFIX/var/lib/pacman"
-    pacman -Udd --noconfirm --overwrite='*' --root="$INSTALL_PREFIX" "$PKGDEST"/$pattern 2>&1 | tail -3
+    # On the darwin cross build the packages are CARCH=arm64 but the host pacman is
+    # Architecture=auto (x86_64) and rejects them. INSTALL_ARCH (set by build.sh's darwin
+    # config) passes --arch <arch> so pacman accepts them; unset on linux → no flag.
+    local arch_args=()
+    [ -n "${INSTALL_ARCH:-}" ] && arch_args=(--arch "$INSTALL_ARCH")
+    pacman -Udd --noconfirm --overwrite='*' "${arch_args[@]}" --root="$INSTALL_PREFIX" "$PKGDEST"/$pattern 2>&1 | tail -3
 }
