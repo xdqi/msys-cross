@@ -10,6 +10,12 @@ set -euo pipefail
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
+# Per-target cross env (ZIG_TARGET, _MSYS_CROSS_HOST/_MSYS_CROSS_BUILD, the
+# MSYS_CROSS_ENV_LOADED marker) — single source of truth, shared with the makepkg conf.
+# Sourced first so the marker guard in msys-cross-common.sh / build_deps.sh passes and
+# the consumers can read each var without a baked-in default.
+source "$SCRIPTS_DIR/env-linux.sh"
+
 # Paths — writable destinations are placed under build/
 export PKGDEST="${PKGDEST:-$PROJECT_ROOT/repo}"
 export SRCDEST="${SRCDEST:-$PROJECT_ROOT/build/sources}"

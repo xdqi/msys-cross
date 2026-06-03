@@ -17,7 +17,14 @@ set -euo pipefail
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
-ZIG_TARGET="${ZIG_TARGET:-aarch64-macos.11.0}"
+# Guard: the per-target cross env (ZIG_TARGET) must have been sourced from
+# scripts/env-darwin.sh first (build-darwin.sh does this). This script does NOT source
+# msys-cross-common.sh, so it carries its own copy of the marker guard.
+[ "${MSYS_CROSS_ENV_LOADED:-}" = 1 ] || {
+    echo "ERROR: source scripts/env-darwin.sh (or build via build-darwin.sh) first" >&2
+    exit 1
+}
+
 PREFIX="${DEPS_INSTALL:-$PROJECT_ROOT/deps/install-$ZIG_TARGET}"
 BREW_ARCH_TAG="${BREW_ARCH_TAG:-arm64_sonoma}"   # oldest arm64 bottle common to these formulae
 ZIGBIN="$(readlink -f "${ZIG_PATH:-$PROJECT_ROOT/build/zig}" 2>/dev/null || true)"

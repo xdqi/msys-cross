@@ -9,6 +9,18 @@
 # This sources the raw MSYS2 PKGBUILD, then lets the caller override
 # metadata (pkgname, depends) and fix functions via sed.
 
+# Guard: the per-target cross env (ZIG_TARGET, _MSYS_CROSS_*) must have been sourced
+# from scripts/env-<target>.sh first. The required var SET differs by target
+# (_MSYS_CROSS_BUILD only on linux, _MSYS_CROSS_DUMPSPECS only on darwin), so we assert
+# the single MSYS_CROSS_ENV_LOADED marker rather than checking each var. This file is
+# sourced (before any default is read) by all three cross PKGBUILDs and by build_deps.sh,
+# so they all inherit the guard. The marker survives both the runuser drop and the
+# makepkg --config -> build() boundary (verified in the arch build container).
+[ "${MSYS_CROSS_ENV_LOADED:-}" = 1 ] || {
+    echo "ERROR: source scripts/env-<target>.sh (or build via build.sh / build-darwin.sh) first" >&2
+    exit 1
+}
+
 _wrappers="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _project_root="$(cd "$_wrappers/.." && pwd)"
 
@@ -22,7 +34,7 @@ _bootstrap_prefix="${BOOTSTRAP_PREFIX:-$_project_root/build/bootstrap-prefix}"
 # Static build dependencies (gmp, mpfr, mpc, isl, zlib, zstd) from build_deps.sh.
 # Per-target prefix so each ZIG_TARGET keeps its own arch's static .a (Linux x86_64
 # and macOS arm64 deps coexist). DEPS still overrides explicitly if set.
-_deps="${DEPS:-$_project_root/deps/install-${ZIG_TARGET:-x86_64-linux-gnu.2.11}}"
+_deps="${DEPS:-$_project_root/deps/install-$ZIG_TARGET}"
 
 # Install prefix: where built cross packages live during the build (binutils, GCC).
 # GCC build needs cross-as/ld in PATH from here.
@@ -142,7 +154,7 @@ setup_zig_env() {
     # gnu) produces a GNU-format archive of Mach-O .o that zig's Mach-O LINKER then rejects
     # with "unknown cpu architecture" (it misreads the GNU symbol table). --format=darwin
     # fixes it. On Linux keep the default gnu archive.
-    case "${ZIG_TARGET:-}" in
+    case "$ZIG_TARGET" in
         *macos*|*darwin*) export AR="zig ar --format=darwin" ;;
         *)                export AR="zig ar" ;;
     esac
@@ -152,7 +164,7 @@ setup_zig_env() {
     # Mach-O's ld has no -Bstatic/-Bdynamic. On a macOS target the deps prefix ships
     # only static .a (no .dylib), so a plain -L suffices to link them statically; on
     # Linux keep the GNU -Bstatic dance verbatim (byte-identical to before).
-    case "${ZIG_TARGET:-}" in
+    case "$ZIG_TARGET" in
         *macos*|*darwin*)
             export LDFLAGS="-L$_deps/lib" ;;
         *)

@@ -10,29 +10,15 @@
 # linux pass leaves it unset → unchanged behavior).
 
 # The whole build runs as one unprivileged user (so the sccache server is single-uid
-# and never hands another uid root-owned objects). runuser scrubs the environment, so
-# forward the bits the build/sccache need explicitly via `env`. Anything writable is
-# chown'd to builduser before use.
+# and never hands another uid root-owned objects). Anything writable is chown'd to
+# builduser before use.
 run_as_builduser() {
     chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" 2>/dev/null || true
-    runuser -u builduser -- env \
-        PATH="$PATH" \
-        ZIG_PATH="$ZIG_PATH" \
-        DEPS="$DEPS" DEPS_INSTALL="$DEPS_INSTALL" DEPS_CACHE="$DEPS_CACHE" \
-        BOOTSTRAP_PREFIX="$BOOTSTRAP_PREFIX" INSTALL_PREFIX="$INSTALL_PREFIX" \
-        PKGDEST="$PKGDEST" SRCDEST="$SRCDEST" LOGDEST="$LOGDEST" \
-        ${BUILDDIR:+BUILDDIR="$BUILDDIR"} \
-        ${_MSYS_CROSS_TARGET:+_MSYS_CROSS_TARGET="$_MSYS_CROSS_TARGET"} \
-        ${ZIG_TARGET:+ZIG_TARGET="$ZIG_TARGET"} \
-        ${_MSYS_CROSS_HOST:+_MSYS_CROSS_HOST="$_MSYS_CROSS_HOST"} \
-        ${_MSYS_CROSS_BUILD:+_MSYS_CROSS_BUILD="$_MSYS_CROSS_BUILD"} \
-        ${_MSYS_CROSS_DUMPSPECS:+_MSYS_CROSS_DUMPSPECS="$_MSYS_CROSS_DUMPSPECS"} \
-        ${_MSYS_CROSS_ZLIB+_MSYS_CROSS_ZLIB="$_MSYS_CROSS_ZLIB"} \
-        JOBS="$JOBS" \
-        SCCACHE_PATH="${SCCACHE_PATH:-}" \
-        SCCACHE_DIR="${SCCACHE_DIR:-}" \
-        SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-}" \
-        "$@"
+    # runuser preserves exported env and resets only PATH (util-linux 2.42.1, verified
+    # in the arch build container). All build vars (ZIG_TARGET, _MSYS_CROSS_*, DEPS*,
+    # PKGDEST…, SCCACHE_* from $GITHUB_ENV, JOBS) are already exported, so they ride
+    # through; we re-assert only PATH (which runuser DOES reset to a secure default).
+    runuser -w PATH -u builduser -- env PATH="$PATH" "$@"
 }
 
 # build_pkg <pkg-dir> [makepkg-args]

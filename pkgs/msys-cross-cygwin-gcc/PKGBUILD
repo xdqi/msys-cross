@@ -22,7 +22,7 @@ eval "$(declare -f _msys2_build | sed \
     -e '/CXXFLAGS=\${CXXFLAGS\/-pipe\/}/d' \
     -e "/export lt_cv_deplibs_check_method='pass_all'/d" \
     -e '/export MSYSTEM=CYGWIN/d' \
-    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}" --host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}" --target=x86_64-pc-cygwin|' \
+    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD}" --host="${_MSYS_CROSS_HOST}" --target=x86_64-pc-cygwin|' \
     -e 's|--prefix=/usr|--prefix="${_stage_prefix}"|' \
     -e 's|--libexecdir=/usr/lib|--libexecdir="${_stage_prefix}/libexec"|' \
     -e 's|--enable-bootstrap|--disable-bootstrap|' \

@@ -19,7 +19,9 @@ ZSTD_VER="${ZSTD_VER:-1.5.7}"
 
 # Per-target install prefix so each ZIG_TARGET's arch keeps its own static .a
 # (Linux x86_64 and macOS arm64 deps coexist). DEPS_INSTALL overrides explicitly.
-PREFIX="${DEPS_INSTALL:-$PROJECT_ROOT/deps/install-${ZIG_TARGET:-x86_64-linux-gnu.2.11}}"
+# ZIG_TARGET comes from env-<target>.sh (the marker guard in msys-cross-common.sh,
+# sourced below, asserts that env was loaded).
+PREFIX="${DEPS_INSTALL:-$PROJECT_ROOT/deps/install-$ZIG_TARGET}"
 DEPS_CACHE="${DEPS_CACHE:-$PROJECT_ROOT/deps}"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -115,8 +117,8 @@ do_build() {
     # host/build overridable (war-future, consistent with the PKGBUILDs): host != build
     # puts autoconf in cross mode so it won't RUN the (non-native) conftest.
     ../$dir/configure --prefix="$PREFIX" --enable-static --disable-shared \
-        --build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}" \
-        --host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}" $extra
+        --build="$_MSYS_CROSS_BUILD" \
+        --host="$_MSYS_CROSS_HOST" $extra
     # make_tgt lets a dep build ONLY its library (skip noinst test programs) — needed
     # for isl, whose C++ test progs pull legacy Mach-O libtool link flags on darwin and
     # are pure waste here. Default (empty) = full `all` for the rest.

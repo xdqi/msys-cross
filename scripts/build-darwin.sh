@@ -14,10 +14,11 @@ set -euo pipefail
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
-# zig target = arm64 macOS 11.0. Drives the zigcc wrapper target, the per-target deps
-# prefix, and (via the conf) CARCH/CHOST. Exported in THIS shell because build_deps.sh
-# and setup_zig_env read it directly (outside makepkg, the darwin conf doesn't reach them).
-export ZIG_TARGET="aarch64-macos.11.0"
+# Per-target cross env (ZIG_TARGET=arm64 macOS 11.0, _MSYS_CROSS_HOST, _MSYS_CROSS_DUMPSPECS,
+# the MSYS_CROSS_ENV_LOADED marker) — single source of truth, shared with the makepkg conf.
+# Sourced first because build_deps.sh / setup_zig_env read these directly outside makepkg
+# (the darwin conf doesn't reach them) and DEPS_INSTALL below derives from ZIG_TARGET.
+source "$SCRIPTS_DIR/env-darwin.sh"
 
 # Paths — darwin uses its OWN repo (repo-darwin/) and per-target deps prefix so it never
 # collides with a linux build sharing the same checkout.
@@ -32,10 +33,8 @@ export ZIG_PATH="${ZIG_PATH:-$PROJECT_ROOT/build/zig}"
 export DEPS_CACHE="$PROJECT_ROOT/deps"
 export JOBS="${JOBS:-$(nproc)}"
 
-# Cross-build knobs (read by the PKGBUILDs; the conf also sets ZIG_TARGET/_MSYS_CROSS_HOST
-# inside makepkg, but build_deps.sh — invoked here directly — needs _MSYS_CROSS_HOST too).
-export _MSYS_CROSS_HOST="aarch64-apple-darwin20"
-export _MSYS_CROSS_DUMPSPECS=1
+# ZIG_TARGET / _MSYS_CROSS_HOST / _MSYS_CROSS_DUMPSPECS come from env-darwin.sh above
+# (read by the PKGBUILDs and by build-deps-darwin.sh, both invoked here directly).
 # Forward the darwin makepkg config to build_pkg (both the --packagelist dry-run and the
 # real build) so CARCH=arm64/PKGEXT=.zst are in effect and skip-detection names match.
 export _MSYS_CROSS_MAKEPKG_CONFIG="$SCRIPTS_DIR/makepkg-darwin-arm64.conf"

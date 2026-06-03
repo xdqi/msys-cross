@@ -10,8 +10,8 @@ inherit_msys2 "mingw-w64-cross-gcc"
 eval "$(declare -f _build | sed \
     -e 's|--prefix=/opt|--prefix="${_stage_prefix}"|g' \
     -e 's|--libexecdir=/opt/lib|--libexecdir="${_stage_prefix}/libexec"|g' \
-    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD:-x86_64-linux-gnu}"|' \
-    -e 's|--host=\${CHOST}|--host="${_MSYS_CROSS_HOST:-x86_64-linux-gnu}"|' \
+    -e 's|--build=\${CHOST}|--build="${_MSYS_CROSS_BUILD}"|' \
+    -e 's|--host=\${CHOST}|--host="${_MSYS_CROSS_HOST}"|' \
     -e 's|--with-{gmp,mpfr,mpc,isl}=/usr|--with-gmp='"$_deps"' --with-mpfr='"$_deps"' --with-mpc='"$_deps"' --with-isl='"$_deps"'|g' \
     -e 's|--enable-libgomp|--disable-libcc1 --enable-libgomp|g' \
     -e 's| fortran|,fortran|g' \
