@@ -7,7 +7,7 @@
 #
 # Applies pre-generated diffs from scripts/zig-patches/ with `patch -N`
 # (idempotent: re-running is a no-op). Then self-verifies and, on failure,
-# restores from patch's .orig backups.
+# restores from .anyfsbak backups.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,6 +91,9 @@ VERIFY_OK=1
 verify_target x86_64-linux-gnu.2.11 posix_memalign aligned_alloc || VERIFY_OK=0
 verify_target x86_64-linux-gnu.2.17 aligned_alloc ""             || VERIFY_OK=0
 
+# On a clean first apply this rolls back via the .anyfsbak backups. On an
+# idempotent re-run patch makes no backup, so restore is a no-op — but the tree
+# is already correctly patched, so there is nothing to roll back to anyway.
 if [ "$VERIFY_OK" -ne 1 ]; then
     restore_backups
     die "self-verify failed; libc++ restored from backups"
