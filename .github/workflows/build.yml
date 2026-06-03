@@ -67,32 +67,35 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
         with:
           version: "v0.10.0"
-      # Backend = LOCAL DISK (SCCACHE_DIR), NOT the GHA object store. sccache's GHA
-      # backend stores every .o as a separate Actions-cache entry; with ~10k tiny
-      # objects (35% <10 KiB) that hits per-request throttling (429s — we saw 176
-      # cache errors in one run) and slow per-object transfer, so even at ~59% hit
-      # rate the wall-clock gain nearly vanished (a known sccache×GHA limitation:
-      # mozilla/sccache#1485, community #55049). Instead we point sccache at a local
-      # dir and let ONE actions/cache step pack the whole dir into a SINGLE cache
-      # entry (one upload / one download), restored across runs below.
-      - name: Configure sccache (local disk backend)
+      # sccache backend = external SeaweedFS S3 (self-hosted, US). Replaces the old
+      # local-disk + single-packed-actions/cache scheme: GitHub hard-capped the
+      # actions-cache API (200 uploads/min/repo, 2026-01) which throttled sccache's
+      # ~10k tiny objects; S3 has no such limit and lets every job/run share one hot
+      # bucket. SeaweedFS specifics: path-style (virtual-host-style left unset),
+      # region ignored by its SigV4 verifier (=auto), no SSE. The zigcc/zigc++
+      # wrappers already route through $SCCACHE_PATH; the backend is pure env.
+      # Secrets absent (e.g. fork PRs) → sccache just misses, build still works.
+      - name: Configure sccache (S3 backend)
+        env:
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET }}
         run: |
-          echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/build/sccache-cache" >> "$GITHUB_ENV"
-          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
-          echo "SCCACHE_PATH=${SCCACHE_PATH}" >> "$GITHUB_ENV"
-      # Restore/save the whole sccache dir as one packed entry. Unique key (run_id)
-      # so every run writes a fresh entry (Actions caches are immutable per key);
-      # restore-keys falls back to the newest prior entry — same branch first, then
-      # any — so each run inherits the previous run's objects plus its own increment.
-      # actions/cache auto-evicts under the 7-day / 10 GiB repo LRU.
-      - name: Cache sccache objects
-        uses: actions/cache@v5
-        with:
-          path: build/sccache-cache
-          key: sccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            sccache-${{ runner.os }}-${{ github.ref_name }}-
-            sccache-${{ runner.os }}-
+          {
+            echo "SCCACHE_PATH=${SCCACHE_PATH}"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=msys2-cross"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "SCCACHE_BUCKET=${SCCACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}"
+            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_BUCKET}" ]; then
+            echo "::warning::SCCACHE_S3_* secrets absent — sccache will run with no backend (every compile a miss)."
+          fi
 
       # The gcc/binutils versions are NOT in our PKGBUILDs — inherit_msys2 greps
       # them from the MSYS2-packages submodule at build time. So the pkg-source
