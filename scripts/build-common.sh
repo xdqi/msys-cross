@@ -13,7 +13,10 @@
 # and never hands another uid root-owned objects). Anything writable is chown'd to
 # builduser before use.
 run_as_builduser() {
-    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" 2>/dev/null || true
+    # DEPS_INSTALL (deps/install-$ZIG_TARGET) is created by build.sh as root but written
+    # by build_deps.sh as builduser — include it here so the linux deps step can write
+    # its static .a (the darwin path chowns it separately; both targets covered now).
+    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" "$DEPS_INSTALL" 2>/dev/null || true
     # runuser preserves exported env and resets only PATH (util-linux 2.42.1, verified
     # in the arch build container). All build vars (ZIG_TARGET, MSYS_CROSS_*, DEPS*,
     # PKGDEST…, SCCACHE_* from $GITHUB_ENV, JOBS) are already exported, so they ride
