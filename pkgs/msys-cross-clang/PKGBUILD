@@ -67,6 +67,33 @@ build() {
     cd "$srcdir"
     [ -d "$_srcname" ] || tar xf "llvm-project-${_pkgver}.src.tar.xz"
 
+    # Stage 1 (always, both hosts): native host tablegens for the cross build. Built with
+    # the *-native zig wrappers (ZIG_TARGET=native -> the builder's gnu target, see
+    # zig-common.sh) so the binaries are host ELF and run on the build machine, independent
+    # of the main build's ZIG_TARGET. clang project enabled so clang-tblgen exists; lld NOT
+    # needed. zlib/zstd OFF: tablegen needs no compression, and on darwin the $_deps .a are
+    # arm64 Mach-O (unusable for a host ELF link). Plain NATIVE configure: no
+    # CMAKE_CROSSCOMPILING / CMAKE_SYSTEM_NAME / host-triple. On a LINUX main build
+    # native==main target so this is cheap redundant work; on DARWIN it is the whole point.
+    # Stage 2 consumes $_nativedir/bin via LLVM_NATIVE_TOOL_DIR (set below), which suppresses
+    # ALL native-tablegen building in the main build — crucially including llvm-min-tblgen,
+    # which LLVM's automatic NATIVE sub-build does NOT cover (it is part of the main build's
+    # bootstrap; on darwin it was being emitted as an arm64 Mach-O binary, unrunnable on the
+    # Linux builder, which was the open blocker). ${CC%/*} is the scripts/ dir holding
+    # zigcc / zigcc-native (CC=$_wrappers/zigcc).
+    local _nativedir="$srcdir/build-native"
+    rm -rf "$_nativedir"
+    cmake -G Ninja -S "$_srcname/llvm" -B "$_nativedir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_ENABLE_PROJECTS="clang" \
+        -DLLVM_TARGETS_TO_BUILD="all" \
+        -DCMAKE_C_COMPILER="${CC%/*}/zigcc-native" \
+        -DCMAKE_CXX_COMPILER="${CC%/*}/zigc++-native" \
+        -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+        -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+        -Wno-dev
+    ninja -C "$_nativedir" llvm-tblgen clang-tblgen llvm-min-tblgen
+
     # Bare upstream LLVM (no MSYS2/MINGW patches — all are cygwin-only / test-only /
     # already-upstream, or GCC-interop overrides official clang64 itself omits). No align
     # compat object: zig's libc++ is already patched. All backends, to match the official
@@ -84,9 +111,19 @@ build() {
     # HOST triple comes from MSYS_CROSS_HOST (same source binutils/gcc use for --host):
     # x86_64-linux-gnu for the native linux build, aarch64-apple-darwin* for the darwin
     # host. On a macOS host we also set CMAKE_SYSTEM_NAME=Darwin so cmake selects Mach-O
-    # conventions (framework probes, no -Bsymbolic, the NATIVE cross-tablegen sub-build);
-    # on linux it must stay unset (setting it to Linux would still trip the same probes).
+    # conventions (framework probes, no -Bsymbolic); on linux it must stay unset (setting it
+    # to Linux would still trip the same probes).
     local _cmake_extra=()
+    # Stage 2: feed the stage-1 native tablegens (built above) into the main build on BOTH
+    # hosts. LLVM_NATIVE_TOOL_DIR is honored by add_tablegen — used by llvm-tblgen,
+    # clang-tblgen AND llvm-min-tblgen — which does `if (EXISTS "${dir}/${target}")` and
+    # redirects ${project}_TABLEGEN to that host binary, so build_native_tool is skipped
+    # per target. This suppresses ALL native-tablegen building in the main build, including
+    # llvm-min-tblgen, which LLVM's automatic NATIVE sub-build does not cover. Replaces the
+    # old darwin-only CROSS_TOOLCHAIN_FLAGS_NATIVE workaround (which fixed only the two tools
+    # that sub-build built and left min-tblgen as an unrunnable arm64 Mach-O on the Linux
+    # builder).
+    _cmake_extra+=(-DLLVM_NATIVE_TOOL_DIR="$_nativedir/bin")
     case "$ZIG_TARGET" in
         *macos*|*darwin*)
             _cmake_extra+=(-DCMAKE_SYSTEM_NAME=Darwin)
@@ -98,19 +135,6 @@ build() {
             # choice for a packaged toolchain anyway (binaries ship with their final RPATH).
             # Linux (ELF) supports the relink, so this is darwin-only.
             _cmake_extra+=(-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
-            # The flags above only reach the MAIN (target) configure. LLVM's cross build ALSO
-            # spins up a NATIVE sub-build (build-cross/NATIVE) for the host-runnable tablegens
-            # (clang-tblgen isn't shipped by the host's llvm package, so it MUST be built).
-            # By default that sub-build inherits the MAIN darwin toolchain (zigc++
-            # target=aarch64-macos) and produces arm64 Mach-O tablegens that can't run on the
-            # Linux builder. Point the NATIVE compilers at the zigcc-native / zigc++-native
-            # wrappers, which force ZIG_TARGET=native (→ the builder's x86_64-linux-gnu target,
-            # see zig-common.sh) so the tablegens are host Linux ELF. Using zig cc (still clang)
-            # rather than host gcc means the inherited clang-only CFLAGS (-fbracket-depth=512)
-            # are accepted — no need to scrub them. Forward the RPATH flag too (issue #68513).
-            # CROSS_TOOLCHAIN_FLAGS_NATIVE is a ;-separated cmake list appended to the NATIVE
-            # cmake invocation.
-            _cmake_extra+=("-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=${CC%/*}/zigcc-native;-DCMAKE_CXX_COMPILER=${CC%/*}/zigc++-native;-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON")
             ;;
     esac
     rm -rf "$_blddir"

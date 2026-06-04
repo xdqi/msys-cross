@@ -18,9 +18,10 @@
 # -target`, and zig_sccache_reexec folds it into the sccache cache-buster (below).
 #
 # Special value ZIG_TARGET=native: build for the BUILD machine (the Linux runner), mapped to
-# that host's canonical gnu target. Used by LLVM's NATIVE cross sub-build — on a darwin host
-# build the main toolchain targets aarch64-macos, but the NATIVE tablegens must run on the
-# Linux builder, so they need a build-native compiler. zig cc is still clang underneath, so
+# that host's canonical gnu target. Used by the clang PKGBUILD's stage-1 native LLVM build —
+# on a darwin host build the main toolchain targets aarch64-macos, but the stage-1 tablegens
+# must run on the Linux builder, so they need a build-native compiler. zig cc is still clang
+# underneath, so
 # the inherited clang-only CFLAGS (-fbracket-depth=512) are accepted; only the target changes.
 # Mapping to a fixed triple (not zig's bare `native`) keeps -dumpmachine and the sccache
 # cache-buster deterministic. These NATIVE tools aren't shipped, so the 2.11 glibc floor is
