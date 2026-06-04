@@ -1,0 +1,6 @@
+#!/bin/bash
+# Host-native zig cc: forces ZIG_TARGET=native (→ the build machine's gnu target, see
+# zig-common.sh) so LLVM's NATIVE cross sub-build builds tablegens that run on the Linux
+# builder, regardless of the main toolchain's ZIG_TARGET (e.g. aarch64-macos). Execs zigcc
+# so $0 there stays a real cc for sccache.
+exec env ZIG_TARGET=native "$(dirname "$(readlink -f "$0")")/zigcc" "$@"

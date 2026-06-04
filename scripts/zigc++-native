@@ -1,0 +1,3 @@
+#!/bin/bash
+# Host-native zig c++. See zigcc-native.
+exec env ZIG_TARGET=native "$(dirname "$(readlink -f "$0")")/zigc++" "$@"

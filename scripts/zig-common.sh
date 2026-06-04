@@ -16,7 +16,23 @@
 # via the ZIG_TARGET env var to retarget the whole toolchain (e.g. aarch64-macos.11.0
 # for a macOS-hosted cross build). Both wrappers pass this verbatim to `zig cc/c++
 # -target`, and zig_sccache_reexec folds it into the sccache cache-buster (below).
+#
+# Special value ZIG_TARGET=native: build for the BUILD machine (the Linux runner), mapped to
+# that host's canonical gnu target. Used by LLVM's NATIVE cross sub-build — on a darwin host
+# build the main toolchain targets aarch64-macos, but the NATIVE tablegens must run on the
+# Linux builder, so they need a build-native compiler. zig cc is still clang underneath, so
+# the inherited clang-only CFLAGS (-fbracket-depth=512) are accepted; only the target changes.
+# Mapping to a fixed triple (not zig's bare `native`) keeps -dumpmachine and the sccache
+# cache-buster deterministic. These NATIVE tools aren't shipped, so the 2.11 glibc floor is
+# irrelevant — it just reuses the linux target.
 ZIG_CC_TARGET="${ZIG_TARGET:-x86_64-linux-gnu.2.11}"
+if [ "$ZIG_CC_TARGET" = native ]; then
+    case "$(uname -m)" in
+        x86_64)         ZIG_CC_TARGET="x86_64-linux-gnu.2.11" ;;
+        aarch64|arm64)  ZIG_CC_TARGET="aarch64-linux-gnu.2.11" ;;
+        *)              ZIG_CC_TARGET="$(uname -m)-linux-gnu" ;;
+    esac
+fi
 
 # zig_sccache_reexec "$@"
 # sccache two-role trick: sccache can't wrap the two-token `zig cc` directly, so the

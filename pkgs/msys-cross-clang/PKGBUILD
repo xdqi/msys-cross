@@ -101,15 +101,16 @@ build() {
             # The flags above only reach the MAIN (target) configure. LLVM's cross build ALSO
             # spins up a NATIVE sub-build (build-cross/NATIVE) for the host-runnable tablegens
             # (clang-tblgen isn't shipped by the host's llvm package, so it MUST be built).
-            # By default that sub-build inherits the MAIN toolchain — here the darwin zigc++
-            # (target=aarch64-macos) + CMAKE_SYSTEM_NAME=Darwin — and so produces arm64 Mach-O
-            # tablegens that (a) can't run on the Linux builder and (b) fail to link ("unknown
-            # cpu architecture", zig mixing Mach-O .a with the host link). The NATIVE sub-build
-            # must use the HOST (Linux/ELF) toolchain. CROSS_TOOLCHAIN_FLAGS_NATIVE is appended
-            # verbatim to the NATIVE cmake; point it at the host gcc/g++ (base-devel, always
-            # present), reset CMAKE_SYSTEM_NAME to Linux, and forward the RPATH flag (issue
-            # #68513). Semicolon-separated cmake list.
-            _cmake_extra+=("-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=gcc;-DCMAKE_CXX_COMPILER=g++;-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON")
+            # By default that sub-build inherits the MAIN darwin toolchain (zigc++
+            # target=aarch64-macos) and produces arm64 Mach-O tablegens that can't run on the
+            # Linux builder. Point the NATIVE compilers at the zigcc-native / zigc++-native
+            # wrappers, which force ZIG_TARGET=native (→ the builder's x86_64-linux-gnu target,
+            # see zig-common.sh) so the tablegens are host Linux ELF. Using zig cc (still clang)
+            # rather than host gcc means the inherited clang-only CFLAGS (-fbracket-depth=512)
+            # are accepted — no need to scrub them. Forward the RPATH flag too (issue #68513).
+            # CROSS_TOOLCHAIN_FLAGS_NATIVE is a ;-separated cmake list appended to the NATIVE
+            # cmake invocation.
+            _cmake_extra+=("-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=${CC%/*}/zigcc-native;-DCMAKE_CXX_COMPILER=${CC%/*}/zigc++-native;-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON")
             ;;
     esac
     rm -rf "$_blddir"
