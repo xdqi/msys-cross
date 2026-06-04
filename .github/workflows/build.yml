@@ -92,9 +92,13 @@ jobs:
       fail-fast: false
       matrix:
         host: [linux, darwin]
-        phase: [chain:mingw64, chain:mingw32, chain:ucrt64, chain:cygwin, clang]
-        # darwin cells are skipped on PRs via the step-level gate below (matrix exclude can't
-        # read github.event_name), so all 10 (host × phase) combinations are declared here.
+        phase: [others, chain:mingw64, chain:mingw32, chain:ucrt64, chain:cygwin, clang]
+        # 2 hosts × 6 phases = 12 cells. `others` builds the foundation packages
+        # (filesystem/ca-certificates/pacman/pkgconfig) in its own cell so the chain/clang
+        # cells don't each rebuild them; chain/clang/others are fully independent (the
+        # compilers don't need the foundation in INSTALL_PREFIX to build). darwin cells are
+        # skipped on PRs via the step-level gate below (matrix exclude can't read
+        # github.event_name).
     steps:
       - name: Skip darwin on PRs
         id: gate

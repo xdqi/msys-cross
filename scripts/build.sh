@@ -31,24 +31,28 @@ esac
 # keeping `build.sh <target>` (= `all`) working verbatim for local dev / fallback.
 #   all (default)        Steps 0-6 in one process (the original behaviour)
 #   prep                 Steps 0-3 only (baked into the prep container image)
+#   others               The foundation packages only: filesystem, ca-certificates, pacman,
+#                        pkgconfig. Their own CI cell so the chain/clang cells don't each
+#                        rebuild them. binutils/gcc/clang don't need them in INSTALL_PREFIX
+#                        at build time (install_local uses -Udd), so this is fully parallel.
 #   chain:<mingw64|mingw32|ucrt64|cygwin>
-#                        foundation installs + binutils-<t> -> install -> gcc-<t>
-#                        (cygwin uses msys-cross-cygwin-gcc). Assumes prep already ran.
+#                        binutils-<t> -> install -> gcc-<t> (cygwin uses msys-cross-cygwin-gcc).
+#                        Assumes prep already ran. Does NOT build the foundation (see `others`).
 #   clang                Step 4b only. Assumes prep already ran.
 #   assemble             Steps 5-6 (repo-add db + installer) over a populated PKGDEST.
-# A chain/clang/assemble phase expects the prep outputs (zig, sysroots, deps) present —
+# A chain/clang/others/assemble phase expects the prep outputs (zig, sysroots, deps) present —
 # in CI they come from the prep image; locally, run `build.sh <target> prep` first.
 PHASE="${2:-all}"
 CHAIN_TARGET=""
 case "$PHASE" in
-    all|prep|clang|assemble) ;;
+    all|prep|others|clang|assemble) ;;
     chain:*) CHAIN_TARGET="${PHASE#chain:}"
         case "$CHAIN_TARGET" in
             mingw64|mingw32|ucrt64|cygwin) ;;
             *) echo "error: chain target must be mingw64|mingw32|ucrt64|cygwin (got '$CHAIN_TARGET')" >&2; exit 1 ;;
         esac ;;
     *)
-        echo "error: unknown phase '$PHASE' (expected: all | prep | chain:<target> | clang | assemble)" >&2
+        echo "error: unknown phase '$PHASE' (expected: all | prep | others | chain:<target> | clang | assemble)" >&2
         exit 1
         ;;
 esac
@@ -132,10 +136,11 @@ echo
 export PATH="$INSTALL_PREFIX/bin:$PATH"
 
 # Per-phase gates. `all` runs everything; the split phases run only their slice.
-_do_prep=false; _do_chain=false; _do_clang=false; _do_assemble=false
+_do_prep=false; _do_others=false; _do_chain=false; _do_clang=false; _do_assemble=false
 case "$PHASE" in
-    all)      _do_prep=true; _do_chain=true; _do_clang=true; _do_assemble=true ;;
+    all)      _do_prep=true; _do_others=true; _do_chain=true; _do_clang=true; _do_assemble=true ;;
     prep)     _do_prep=true ;;
+    others)   _do_others=true ;;
     chain:*)  _do_chain=true ;;
     clang)    _do_clang=true ;;
     assemble) _do_assemble=true ;;
@@ -209,10 +214,11 @@ fi  # _do_prep (Steps 1-3)
 # build_pkg / install_local live in build-common.sh (sourced above, every phase).
 
 # ---- Foundation packages ----
-# The few cheap packages binutils/gcc need installed locally (filesystem/ca-certs/pacman/
-# pkgconfig). Built+installed for `all` and for EVERY chain cell (each cell has its own
-# per-runner INSTALL_PREFIX). Tiny (pacman -Udd of small pkgs), so the per-cell duplication
-# is negligible. Also for clang (its build wants pkgconfig wrappers on PATH).
+# filesystem / ca-certificates / pacman / pkgconfig. These are the user-facing "others" of
+# the repo; binutils/gcc/clang declare them as runtime depends but do NOT need them in
+# INSTALL_PREFIX to BUILD (install_local uses -Udd = nodeps; the compilers build via zig +
+# the sysroot, not these packages). So they get their OWN `others` cell rather than being
+# rebuilt in every chain/clang cell. For the monolithic `all` they still run inline.
 _build_foundation() {
     echo ""
     echo "===== Foundation packages ====="
@@ -259,12 +265,15 @@ _build_chain() {
 }
 
 # ---- Step 4: Build packages ----
-# `all`  -> foundation + all four chains (mingw64 first so binutils-common is produced once).
-# chain:<t> -> foundation + that one chain only (a single CI cell).
+# others    -> the foundation packages only (its own cell).
+# chain:<t> -> that one target's binutils->gcc chain only (its own cell), NO foundation.
+# all       -> foundation + all four chains (mingw64 first so binutils-common is produced once).
+if $_do_others; then
+    _build_foundation
+fi
 if $_do_chain; then
     echo ""
-    echo "===== Step 4: Build packages ====="
-    _build_foundation
+    echo "===== Step 4: Build chains ====="
     if [ -n "$CHAIN_TARGET" ]; then
         _build_chain "$CHAIN_TARGET"
     else
