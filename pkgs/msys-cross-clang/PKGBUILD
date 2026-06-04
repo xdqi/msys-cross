@@ -98,15 +98,18 @@ build() {
             # choice for a packaged toolchain anyway (binaries ship with their final RPATH).
             # Linux (ELF) supports the relink, so this is darwin-only.
             _cmake_extra+=(-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
-            # The flag above only reaches the MAIN (target) configure. LLVM's cross build
-            # ALSO spins up a NATIVE sub-build (build-cross/NATIVE) for the host-runnable
-            # tablegens, and llvm_create_cross_target does NOT propagate
-            # CMAKE_BUILD_WITH_INSTALL_RPATH into it — so the NATIVE configure (which here
-            # wrongly inherits the Darwin platform) hits the very same Ninja+Mach-O RPATH
-            # relink error and the generate step fails (LLVM issue #68513). Forward the flag
-            # explicitly through CROSS_TOOLCHAIN_FLAGS_NATIVE, which llvm_create_cross_target
-            # passes verbatim to the NATIVE cmake invocation.
-            _cmake_extra+=(-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
+            # The flags above only reach the MAIN (target) configure. LLVM's cross build ALSO
+            # spins up a NATIVE sub-build (build-cross/NATIVE) for the host-runnable tablegens
+            # (clang-tblgen isn't shipped by the host's llvm package, so it MUST be built).
+            # By default that sub-build inherits the MAIN toolchain — here the darwin zigc++
+            # (target=aarch64-macos) + CMAKE_SYSTEM_NAME=Darwin — and so produces arm64 Mach-O
+            # tablegens that (a) can't run on the Linux builder and (b) fail to link ("unknown
+            # cpu architecture", zig mixing Mach-O .a with the host link). The NATIVE sub-build
+            # must use the HOST (Linux/ELF) toolchain. CROSS_TOOLCHAIN_FLAGS_NATIVE is appended
+            # verbatim to the NATIVE cmake; point it at the host gcc/g++ (base-devel, always
+            # present), reset CMAKE_SYSTEM_NAME to Linux, and forward the RPATH flag (issue
+            # #68513). Semicolon-separated cmake list.
+            _cmake_extra+=("-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=gcc;-DCMAKE_CXX_COMPILER=g++;-DCMAKE_SYSTEM_NAME=Linux;-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON")
             ;;
     esac
     rm -rf "$_blddir"
