@@ -47,25 +47,16 @@ jobs:
         with:
           submodules: recursive
 
-      # Tag the prep image by a hash of ONLY the inputs that affect prep (Dockerfile +
-      # prepare/deps scripts + the MSYS2-packages submodule commit that pins gcc/binutils
-      # versions). Two commits with identical prep inputs → identical tag → the image is
-      # reused as-is (the build step below detects it already exists on ghcr and skips the
-      # rebuild/push). Only a real prep change produces a new tag.
-      - name: Compute image tag (content hash of prep inputs)
+      # Tag the prep image by the triggering commit's short SHA, so the image is rebuilt every
+      # run from THIS commit's checkout context (Dockerfile's `COPY . .` bakes the current
+      # source + submodules). That keeps the baked /opt/msys-cross tree in lock-step with the
+      # commit under test — the cells build the right source without any in-container re-sync.
+      # buildx's gha layer cache keeps the heavy prep layers (linux deps from source) fast, so
+      # a rebuild that changes only source is cheap (the deps layers are cache hits).
+      - name: Compute image tag
         id: meta
         run: |
-          sub="$(git -C deps/MSYS2-packages rev-parse HEAD 2>/dev/null || echo nosub)"
-          h="$( { sha256sum Dockerfile.prep \
-                            scripts/prepare-zig.sh \
-                            scripts/prepare-build-sysroot.sh \
-                            scripts/build_deps.sh \
-                            scripts/build-deps-darwin.sh \
-                            scripts/patch_zig_libcxx_oldglibc.sh \
-                            scripts/zig-common.sh \
-                            scripts/msys-cross-common.sh 2>/dev/null
-                  echo "$sub"; } | sha256sum | cut -c1-16 )"
-          tag="prep-${h}"
+          tag="sha-${GITHUB_SHA::12}"
           echo "image=${PREP_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "Prep image tag: ${tag}"
@@ -77,28 +68,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Reuse: if an image with this content-hash tag already exists on ghcr, skip the build.
-      - name: Check if prep image already exists
-        id: exists
-        run: |
-          if docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Prep image already exists — skipping rebuild."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Prep image not found — will build."
-          fi
-
       - name: Set up Docker Buildx
-        if: steps.exists.outputs.exists != 'true'
         uses: docker/setup-buildx-action@v3
 
-      # Build + push the prep image (only when not already present). The Dockerfile builds the
-      # linux deps from source (the heavy bit) and fetches darwin bottles; buildx gha cache
-      # keeps even a rebuild fast. sccache is NOT used here — prep compiles only the small
-      # static deps via zig directly.
+      # Build + push the prep image every run. The Dockerfile builds the linux deps from
+      # source (the heavy bit) and fetches darwin bottles; buildx gha cache makes an unchanged
+      # rebuild fast (only layers whose inputs changed re-run). sccache is NOT used here — prep
+      # compiles only the small static deps via zig directly.
       - name: Build and push prep image
-        if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -139,31 +116,12 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The prep image already contains the repo at /opt/msys-cross with prep outputs. Use it
-      # as the working tree so build/ and deps/ from the image are present.
+      # The prep image is rebuilt every run from this commit (SHA-tagged, COPY . .), so
+      # /opt/msys-cross already holds the current source AND the prep outputs (build/, deps/).
+      # Build straight from it — no in-container re-sync needed.
       - name: Enter prep workspace
         if: steps.gate.outputs.skip != 'true'
         run: echo "WS=/opt/msys-cross" >> "$GITHUB_ENV"
-
-      # Sync the baked-in repo to the triggering commit. The prep image's content tag hashes
-      # ONLY prep inputs (Dockerfile.prep + prepare/deps scripts + the MSYS2 submodule), so a
-      # change to a PKGBUILD or a build-phase script does NOT produce a new prep image — the
-      # image (and its COPYed repo snapshot) is reused as-is. Without this sync the cell would
-      # build whatever source happened to be baked into that reused image, silently ignoring
-      # the commit under test. Fetch the exact SHA and hard-reset so the cell builds the
-      # current tree while keeping the prep outputs (build/, deps/, which git leaves alone as
-      # they are .gitignored). Submodules are re-synced for the same reason.
-      - name: Sync workspace to triggering commit
-        if: steps.gate.outputs.skip != 'true'
-        working-directory: /opt/msys-cross
-        run: |
-          git config --global --add safe.directory /opt/msys-cross
-          git -c http.extraheader="AUTHORIZATION: bearer ${{ github.token }}" \
-              fetch --no-tags --force origin "${{ github.sha }}"
-          git checkout --force --detach "${{ github.sha }}"
-          git -c http.extraheader="AUTHORIZATION: bearer ${{ github.token }}" \
-              submodule update --init --recursive --force
-          echo "Synced /opt/msys-cross to ${{ github.sha }}"
 
       - name: Set up sccache
         if: steps.gate.outputs.skip != 'true'
