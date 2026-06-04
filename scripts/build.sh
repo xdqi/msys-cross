@@ -228,8 +228,13 @@ _build_foundation() {
     install_local "msys-cross-filesystem-*.pkg.tar.*"
     install_local "msys-cross-ca-certificates-*.pkg.tar.*"
     install_local "msys-cross-pacman-*.pkg.tar.*"
+    # The pkgconfig dir builds the split msys-cross-pkgconf set: the common host pkgconf binary
+    # (msys-cross-pkgconf) + one msys-cross-<target>-pkgconf per target. Two non-overlapping
+    # globs install the common package and all per-target packages (the first matches only the
+    # common one; the second requires a <target> segment so it matches only the per-target ones).
     build_pkg "msys-cross-pkgconfig"       "$MAKEPKG_ARGS"
-    install_local "msys-cross-pkgconfig-*.pkg.tar.*"
+    install_local "msys-cross-pkgconf-*.pkg.tar.*"
+    install_local "msys-cross-*-pkgconf-*.pkg.tar.*"
 }
 
 # ---- One target's binutils -> gcc chain ----

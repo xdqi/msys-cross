@@ -10,10 +10,17 @@
 # We also set PKG_CONFIG_LIBDIR (not just _PATH) to wipe out the default
 # host search path so the host's /usr/lib/pkgconfig/blkid.pc and friends
 # don't accidentally leak into a Windows build.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Invoked via a bin/<triple>-{pkgconf,pkg-config} symlink (target = ../libexec/cross-pkg-config).
+# $0 is the bin/ symlink path, so dirname $0 = <prefix>/bin and its parent is the toolchain
+# PREFIX (which holds bin/ and libexec/). The real pkgconf lives in <prefix>/libexec/pkgconf.
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="$(cd "$BIN_DIR/.." && pwd)"
+PKGCONF="$PREFIX/libexec/pkgconf"
 
+# Derive the target from the invoked name, stripping either suffix (<triple>-pkgconf or
+# <triple>-pkg-config).
 _target="${0##*/}"
+_target="${_target%-pkgconf}"
 _target="${_target%-pkg-config}"
 
 case "$_target" in
@@ -34,4 +41,7 @@ _sysroot="$PREFIX/$_subdir"
 export PKG_CONFIG_SYSROOT_DIR="$PREFIX"
 export PKG_CONFIG_LIBDIR="$_sysroot/lib/pkgconfig:$_sysroot/share/pkgconfig"
 unset PKG_CONFIG_PATH
-exec pkg-config "$@"
+# Exec the bundled pkgconf (libexec/, derived from PREFIX → relocatable), not whatever
+# pkg-config is on PATH. msys-cross-pkgconf builds pkgconf from source, so the cross
+# toolchain is self-contained (no system pkg-config required).
+exec "$PKGCONF" "$@"

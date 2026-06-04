@@ -1,32 +1,102 @@
 # Maintainer: msys2-cross project
 _startdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-pkgname=msys-cross-pkgconfig
-pkgver=1.0
-pkgrel=2
-pkgdesc="Cross pkg-config wrappers for msys2-cross toolchains"
+source "$_startdir/../../scripts/msys-cross-common.sh"
+
+# Split into: msys-cross-pkgconf (the host-native pkgconf binary + cross wrapper, in libexec)
+# and one msys-cross-<triple>-pkgconf per target (just the bin/<triple>-{pkgconf,pkg-config}
+# symlinks, depending on msys-cross-pkgconf). One makepkg run produces all 8 packages — the
+# pkgconf binary is host-native (not per-target), so the per-target packages are pure symlinks.
+pkgbase=msys-cross-pkgconf
+# pkgver tracks the bundled pkgconf; pkgrel bumps for wrapper/packaging changes.
+_pkgconfver=2.5.1
+pkgver="$_pkgconfver"
+pkgrel=1
 arch=('x86_64')
+url="https://github.com/pkgconf/pkgconf"
+license=('ISC')
 options=('!strip')
-depends=('msys-cross-filesystem')
 
-source=("cross-pkg-config")
-sha256sums=('SKIP')
-
+# One per target. Each entry: "<short>:<linkname>:<subdir>".
+#   <short>    package short name  → msys-cross-<short>-pkgconf (matches binutils/gcc naming)
+#   <linkname> the bin symlink stem → <linkname>-{pkgconf,pkg-config}
+#   <subdir>   the cross-prefix sysroot subdir the wrapper points PKG_CONFIG_* at
+# mingw/ucrt/cygwin use the autotools $host triple as the link name; clang64/clangarm64 use
+# their short name (their triple x86_64-w64-mingw32 would collide with mingw64's, and they
+# differ only by sysroot). The wrapper's case map keys on <linkname>.
 _targets=(
-    x86_64-w64-mingw32
-    i686-w64-mingw32
-    x86_64-w64-mingw32ucrt
-    x86_64-pc-cygwin
-    clang64
-    clangarm64
-    aarch64-w64-mingw32
+    "mingw64:x86_64-w64-mingw32:mingw64"
+    "mingw32:i686-w64-mingw32:mingw32"
+    "ucrt64:x86_64-w64-mingw32ucrt:ucrt64"
+    "cygwin:x86_64-pc-cygwin:usr"
+    "clang64:clang64:clang64"
+    "clangarm64:clangarm64:clangarm64"
 )
 
-package() {
-    mkdir -p "$pkgdir/bin"
+# pkgname[0] = the common binary package; the rest = one per target (short name).
+pkgname=("msys-cross-pkgconf")
+for _e in "${_targets[@]}"; do
+    pkgname+=("msys-cross-${_e%%:*}-pkgconf")
+done
 
-    install -m755 "$srcdir/cross-pkg-config" "$pkgdir/bin/cross-pkg-config"
+# pkgconf release tarball (ships a pre-generated ./configure, no autotools needed) + our
+# relocatable wrapper. Ariadne is upstream's canonical distfiles host. pkgconf has NO external
+# lib deps — just a C compiler + libc.
+source=("https://distfiles.ariadne.space/pkgconf/pkgconf-${_pkgconfver}.tar.xz"
+        "cross-pkg-config")
+# SKIP: this repo builds from pinned upstreams without PGP; version is pinned via pkgver.
+sha256sums=('SKIP' 'SKIP')
+noextract=("pkgconf-${_pkgconfver}.tar.xz")
 
-    for _target in "${_targets[@]}"; do
-        ln -sf cross-pkg-config "$pkgdir/bin/${_target}-pkg-config"
-    done
+prepare() {
+    cd "$srcdir"
+    rm -rf "pkgconf-${_pkgconfver}"
+    tar xf "pkgconf-${_pkgconfver}.tar.xz"
 }
+
+build() {
+    # Build pkgconf for the HOST (linux x86_64 ELF or darwin arm64 Mach-O) with the repo's zig
+    # cc toolchain. pkgconf reads PKG_CONFIG_SYSROOT_DIR / PKG_CONFIG_LIBDIR purely at RUNTIME,
+    # so the compiled-in default path is only a fallback the wrapper overrides.
+    setup_zig_env
+    # setup_zig_env's LDFLAGS pulls in gmp/mpfr/... which pkgconf doesn't need; reset.
+    export LDFLAGS=""
+    cd "$srcdir/pkgconf-${_pkgconfver}"
+    # host != build puts autoconf in cross mode (won't RUN a non-native conftest). Static so
+    # the shipped binary carries no libpkgconf.so runtime dependency. --with-system-*dir are
+    # harmless placeholders (the wrapper's PKG_CONFIG_LIBDIR overrides at runtime), just
+    # silencing configure's warning.
+    ./configure \
+        --prefix=/ \
+        --with-system-libdir=/lib \
+        --with-system-includedir=/include \
+        --disable-shared --enable-static \
+        --build="$MSYS_CROSS_BUILD" --host="$MSYS_CROSS_HOST"
+    make -j"$(nproc)"
+}
+
+# ---- common: the host-native pkgconf binary + cross wrapper, both under libexec ----
+package_msys-cross-pkgconf() {
+    pkgdesc="pkgconf ${_pkgconfver} (host-native) + cross pkg-config wrapper for msys2-cross"
+    depends=('msys-cross-filesystem')
+    mkdir -p "$pkgdir/libexec"
+    # Implementation lives in libexec/; bin/ is populated by the per-target packages with only
+    # the user-facing <triple>-{pkgconf,pkg-config} symlinks.
+    install -m755 "$srcdir/pkgconf-${_pkgconfver}/pkgconf" "$pkgdir/libexec/pkgconf"
+    install -m755 "$srcdir/cross-pkg-config"               "$pkgdir/libexec/cross-pkg-config"
+}
+
+# ---- per-target packages: just the two bin symlinks → libexec ----
+# Generated below: package_msys-cross-<short>-pkgconf for each target. Each ships
+# bin/<linkname>-pkgconf and bin/<linkname>-pkg-config, both → ../libexec/cross-pkg-config
+# (the wrapper derives the target from its own invoked name). Relative targets so the tree
+# relocates.
+for _e in "${_targets[@]}"; do
+    _short="${_e%%:*}"; _rest="${_e#*:}"; _link="${_rest%%:*}"
+    eval "package_msys-cross-${_short}-pkgconf() {
+        pkgdesc=\"pkg-config (pkgconf) for the ${_short} cross toolchain\"
+        depends=('msys-cross-pkgconf')
+        mkdir -p \"\$pkgdir/bin\"
+        ln -sf ../libexec/cross-pkg-config \"\$pkgdir/bin/${_link}-pkgconf\"
+        ln -sf ../libexec/cross-pkg-config \"\$pkgdir/bin/${_link}-pkg-config\"
+    }"
+done
