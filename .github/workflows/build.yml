@@ -145,6 +145,26 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         run: echo "WS=/opt/msys-cross" >> "$GITHUB_ENV"
 
+      # Sync the baked-in repo to the triggering commit. The prep image's content tag hashes
+      # ONLY prep inputs (Dockerfile.prep + prepare/deps scripts + the MSYS2 submodule), so a
+      # change to a PKGBUILD or a build-phase script does NOT produce a new prep image — the
+      # image (and its COPYed repo snapshot) is reused as-is. Without this sync the cell would
+      # build whatever source happened to be baked into that reused image, silently ignoring
+      # the commit under test. Fetch the exact SHA and hard-reset so the cell builds the
+      # current tree while keeping the prep outputs (build/, deps/, which git leaves alone as
+      # they are .gitignored). Submodules are re-synced for the same reason.
+      - name: Sync workspace to triggering commit
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: /opt/msys-cross
+        run: |
+          git config --global --add safe.directory /opt/msys-cross
+          git -c http.extraheader="AUTHORIZATION: bearer ${{ github.token }}" \
+              fetch --no-tags --force origin "${{ github.sha }}"
+          git checkout --force --detach "${{ github.sha }}"
+          git -c http.extraheader="AUTHORIZATION: bearer ${{ github.token }}" \
+              submodule update --init --recursive --force
+          echo "Synced /opt/msys-cross to ${{ github.sha }}"
+
       - name: Set up sccache
         if: steps.gate.outputs.skip != 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
