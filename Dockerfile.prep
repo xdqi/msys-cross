@@ -45,4 +45,11 @@ RUN bash scripts/build.sh linux  prep && \
     bash scripts/build.sh darwin prep && \
     chown -R builduser:builduser build deps 2>/dev/null || true
 
+# Slim the image: prepare-build-sysroot's `pacman -Sy --root=<sysroot>` downloads the 4
+# sysroots' packages into the HOST cache (pacman.conf has no CacheDir; --root doesn't rebase
+# it), and build_deps leaves cached source tarballs under build/.deps-src. Neither is needed
+# at cell runtime (cells need only build/bootstrap-prefix + deps/install-*). Drop them in this
+# same layer so they never get committed.
+RUN rm -rf /var/cache/pacman/pkg/* build/.deps-src build/sources 2>/dev/null || true
+
 # Cells will `cd /opt/msys-cross` and run their phase; the workflow sets the working dir.

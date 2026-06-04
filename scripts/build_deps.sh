@@ -37,7 +37,10 @@ export LDFLAGS=""
 # so point NM at an llvm-nm (reads every format LLVM emits) when one is available.
 # Only matters for cross targets; on a native Linux build the host nm works too.
 if [ -z "${NM:-}" ]; then
-    _llvm_nm="$(command -v llvm-nm 2>/dev/null || ls /usr/lib/llvm-*/bin/llvm-nm /usr/bin/llvm-nm-* 2>/dev/null | sort -V | tail -1)"
+    # `|| true` inside the $(): when llvm-nm is absent AND the ls globs match nothing, ls
+    # exits 2; under pipefail that would abort the script via set -e, defeating the graceful
+    # fall-through to host nm. Keep it non-fatal so $_llvm_nm just ends up empty.
+    _llvm_nm="$(command -v llvm-nm 2>/dev/null || ls /usr/lib/llvm-*/bin/llvm-nm /usr/bin/llvm-nm-* 2>/dev/null | sort -V | tail -1 || true)"
     [ -n "$_llvm_nm" ] && export NM="$_llvm_nm"
 fi
 
@@ -153,3 +156,15 @@ done
 
 echo "=== deps done ==="
 ls -la "$PREFIX/lib/lib"{gmp,mpfr,mpc,isl,z,zstd}.a
+
+# Reclaim the extracted source + *-build object trees under $WORK_DEPS — the static .a are
+# now installed into $PREFIX, so these are pure scratch. The `*/` glob matches only the
+# subdirectories (source + build trees); the downloaded *.tar.* tarballs are plain files and
+# are kept, so a re-run still skips the re-download. Without this the whole tree (source +
+# intermediate .o) gets baked into the prep image, which only needs deps/install-*/ at runtime.
+echo "--- Cleaning deps scratch trees (keeping cached tarballs) ---"
+shopt -s nullglob
+for _d in "$WORK_DEPS"/*/; do
+    rm -rf "$_d"
+done
+shopt -u nullglob

@@ -318,9 +318,14 @@ fi
 echo ""
 echo "===== Build complete (target=$TARGET, phase=$PHASE) ====="
 echo "Repo: $PKGDEST"
-ls "$PKGDEST"/*.pkg.tar.* 2>/dev/null | while read -r f; do
+# nullglob so an empty PKGDEST (e.g. the `prep` phase builds zero packages) doesn't make
+# `ls` exit 2 and abort the script under set -euo pipefail — which would fail the Docker
+# prep image build (`build.sh linux prep &&`). Matches the repo-add loop's pattern.
+shopt -s nullglob
+for f in "$PKGDEST"/*.pkg.tar.*; do
     echo "  $(basename "$f")"
 done
+shopt -u nullglob
 if $_do_assemble; then
     echo ""
     echo "Database:"

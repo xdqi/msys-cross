@@ -40,7 +40,9 @@ build_pkg() {
     # post-build `rm -rf "$BUILDDIR"` reclaims each target's tree independently.
     export BUILDDIR="$PROJECT_ROOT/build/$pkg_dir${MSYS_CROSS_TARGET:+-$MSYS_CROSS_TARGET}"
     mkdir -p "$BUILDDIR" "$PKGDEST" "$SRCDEST" "$LOGDEST"
-    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST"
+    # Guarded like the sibling chown in run_as_builduser — a chown failure (e.g. a fs that
+    # rejects it) shouldn't abort the build under set -e.
+    chown -R builduser:builduser "$PROJECT_ROOT/build" "$PKGDEST" "$SRCDEST" "$LOGDEST" 2>/dev/null || true
 
     # Compute expected output packages via makepkg --packagelist (dry-run). Forward
     # MSYS_CROSS_TARGET (runuser scrubs env) so the dry-run names match the build.
