@@ -98,6 +98,15 @@ build() {
             # choice for a packaged toolchain anyway (binaries ship with their final RPATH).
             # Linux (ELF) supports the relink, so this is darwin-only.
             _cmake_extra+=(-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
+            # The flag above only reaches the MAIN (target) configure. LLVM's cross build
+            # ALSO spins up a NATIVE sub-build (build-cross/NATIVE) for the host-runnable
+            # tablegens, and llvm_create_cross_target does NOT propagate
+            # CMAKE_BUILD_WITH_INSTALL_RPATH into it — so the NATIVE configure (which here
+            # wrongly inherits the Darwin platform) hits the very same Ninja+Mach-O RPATH
+            # relink error and the generate step fails (LLVM issue #68513). Forward the flag
+            # explicitly through CROSS_TOOLCHAIN_FLAGS_NATIVE, which llvm_create_cross_target
+            # passes verbatim to the NATIVE cmake invocation.
+            _cmake_extra+=(-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
             ;;
     esac
     rm -rf "$_blddir"
