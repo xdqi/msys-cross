@@ -135,6 +135,17 @@ build() {
             # choice for a packaged toolchain anyway (binaries ship with their final RPATH).
             # Linux (ELF) supports the relink, so this is darwin-only.
             _cmake_extra+=(-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
+            # CMAKE_AR/CMAKE_RANLIB: LLVM's cmake IGNORES the $AR env var (which setup_zig_env
+            # sets to `zig ar --format=darwin`) and auto-detects an archiver, producing the
+            # static lib*.a as GNU-format archives of arm64 Mach-O objects. zig's Mach-O LINKER
+            # then rejects those archives' symbol tables at the final clang/lld link with
+            # "unknown cpu architecture: <number>" (it misreads the GNU symbol table as a
+            # cputype). Point CMAKE_AR at the zig-ar-darwin wrapper (`zig ar --format=darwin`
+            # as a single executable, since CMAKE_AR takes one path) so the archives are Mach-O
+            # format and the linker can read them. CMAKE_RANLIB → zig-ranlib (single-path).
+            # Linux keeps the default GNU archiver — darwin-only.
+            _cmake_extra+=(-DCMAKE_AR="${CC%/*}/zig-ar-darwin")
+            _cmake_extra+=(-DCMAKE_RANLIB="${CC%/*}/zig-ranlib")
             ;;
     esac
     rm -rf "$_blddir"
