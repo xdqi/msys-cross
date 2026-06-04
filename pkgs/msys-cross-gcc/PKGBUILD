@@ -162,6 +162,27 @@ build() {
         # enabled in this build") because the helper carries its own cc1/cc1plus backends.
         eval "$(declare -f _build | sed \
             -e 's#make -j"$(nproc)" all-gcc#make -j"$(nproc)" GCC_FOR_TARGET="${_specs_gcc}" all-gcc#')"
+
+        # GCC 16's configure runs an external secrel32 probe (PR80881 Windows-TLS guard):
+        # it ACTUALLY runs as/ld/objdump on a `.secrel32` conftest. Our target as/ld are
+        # arm64 Mach-O — unrunnable here — so the probe dies ("Error occurred while checking
+        # for broken secrel32 relocations") before make starts. Point configure's cached
+        # gcc_cv_as/gcc_cv_ld/gcc_cv_objdump at the wine wrappers around the MSYS2 sysroot's
+        # native <triple>-{as,ld,objdump}.exe (prepare-build-sysroot.sh): the conftest is
+        # target-only so they give correct results, and TLS stays enabled. make all-gcc is
+        # host-only (no target libgcc/libstdc++ built here), so these target tools are only
+        # ever invoked by configure's probe, never the real compile.
+        for _tool in as ld objdump; do
+            _w="${_bootstrap_prefix}/specs-helper/bin/${_t}-${_tool}"
+            if [ ! -x "$_w" ]; then
+                echo "ERROR: secrel32 wine wrapper not found: $_w" >&2
+                echo "       run prepare-build-sysroot.sh first (it generates the as/ld/objdump wrappers)." >&2
+                return 1
+            fi
+        done
+        export gcc_cv_as="${_bootstrap_prefix}/specs-helper/bin/${_t}-as"
+        export gcc_cv_ld="${_bootstrap_prefix}/specs-helper/bin/${_t}-ld"
+        export gcc_cv_objdump="${_bootstrap_prefix}/specs-helper/bin/${_t}-objdump"
     fi
     _msys2_build
 }

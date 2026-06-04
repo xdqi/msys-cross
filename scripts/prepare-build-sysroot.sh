@@ -150,6 +150,57 @@ WRAP
         chmod +x "$SPECS_ROOT/bin/${_tr}-gcc"
         echo "  + ${_tr}-gcc -> wine $_sub/bin/$_exe"
     done
+
+    # ---- wine wrappers for as / ld / objdump (GCC 16 secrel32 configure probe) ----
+    # GCC 16's configure has a Windows-TLS guard (PR80881) that, for an EXTERNAL (non-
+    # in-tree) linker, ACTUALLY RUNS as/ld/objdump on a `.secrel32 foo` conftest. On the
+    # darwin host those tools are arm64 Mach-O and can't execute on the x86_64 Linux
+    # builder, so the probe dies with "Error occurred while checking for broken secrel32
+    # relocations" before make even starts. The conftest is target-only (the relocation
+    # is a property of the mingw target, not the host), so the MSYS2 sysroot's native
+    # <triple>-{as,ld,objdump}.exe — run under wine — produce identical, correct results.
+    # We point GCC configure's gcc_cv_as/gcc_cv_ld/gcc_cv_objdump at these wrappers (darwin
+    # gcc PKGBUILD). They take Unix paths and hand them to the PE tool unchanged: wine
+    # accepts forward-slash Unix paths for files under the current dir (the conftest runs
+    # in a temp cwd), so no path translation is needed for this probe. make all-gcc is
+    # host-only (no target libgcc/libstdc++ here — those are copied from the sysroot), so
+    # the real compile never invokes these target tools; only configure's probe does.
+    declare -A _TOOLS_SUB=(
+        [i686-w64-mingw32]=mingw32
+        [x86_64-w64-mingw32]=mingw64
+        [x86_64-w64-mingw32ucrt]=ucrt64
+        [x86_64-pc-cygwin]=usr
+    )
+    for _tr in "${!_TOOLS_SUB[@]}"; do
+        _sub="${_TOOLS_SUB[$_tr]}"
+        _exedir="$OUT/$_sub/bin"
+        # ucrt's native binutils are named x86_64-w64-mingw32-* (same as mingw64) in the
+        # ucrt64 sysroot; cygwin uses its own x86_64-pc-cygwin-* prefix.
+        case "$_tr" in
+            x86_64-w64-mingw32ucrt) _bprefix=x86_64-w64-mingw32 ;;
+            *)                      _bprefix=$_tr ;;
+        esac
+        for _tool in as ld objdump; do
+            _exe="${_bprefix}-${_tool}.exe"
+            if [ ! -x "$_exedir/$_exe" ]; then
+                echo "  WARNING: native $_tool.exe not found for $_tr ($_exedir/$_exe) — skip"
+                continue
+            fi
+            cat > "$SPECS_ROOT/bin/${_tr}-${_tool}" <<WRAP
+#!/bin/sh
+# wine wrapper for GCC configure's external secrel32 probe. The native Windows
+# $_exe is the same TARGET as the darwin host's $_tool, so its output on the
+# target-only .secrel32 conftest matches. Used only by configure (gcc_cv_$_tool);
+# make all-gcc is host-only and never invokes the target $_tool.
+export WINEPREFIX="$SPECS_WINEPREFIX" WINEDEBUG=-all
+export WINEPATH="$_exedir"   # so the .exe finds its sibling DLLs
+exec wine "$_exedir/$_exe" "\$@"
+WRAP
+            chmod +x "$SPECS_ROOT/bin/${_tr}-${_tool}"
+            echo "  + ${_tr}-${_tool} -> wine $_sub/bin/$_exe"
+        done
+    done
+
     echo "  wine specs-helpers under $SPECS_ROOT/bin (NOT on PATH)"
 else
     echo "  wine not installed — skipping specs-helper generation (linux-only build, not needed)"
