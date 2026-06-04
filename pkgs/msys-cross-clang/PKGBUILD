@@ -87,18 +87,6 @@ build() {
     # conventions (framework probes, no -Bsymbolic, the NATIVE cross-tablegen sub-build);
     # on linux it must stay unset (setting it to Linux would still trip the same probes).
     local _cmake_extra=()
-    # TableGen for the cross build. On linux (host == build) the host llvm-tblgen runs fine, so
-    # use it and skip the NATIVE sub-build. On darwin we must NOT pin LLVM_TABLEGEN: clang-tblgen
-    # has no host binary to point at (the host llvm package ships only llvm-tblgen), and pinning
-    # LLVM_TABLEGEN makes LLVM build clang-tblgen in the MAIN (darwin) build with the target
-    # toolchain → arm64 Mach-O that can't run on / link for the Linux builder ("unknown cpu
-    # architecture"). Leaving it unset makes LLVM build BOTH tablegens in the NATIVE sub-build,
-    # which Fix M already points at the host-runnable zigcc-native toolchain.
-    local _tablegen_flag=()
-    case "$ZIG_TARGET" in
-        *macos*|*darwin*) ;;  # no LLVM_TABLEGEN → NATIVE sub-build builds llvm+clang tblgen
-        *) _tablegen_flag=(-DLLVM_TABLEGEN="$(command -v llvm-tblgen)") ;;
-    esac
     case "$ZIG_TARGET" in
         *macos*|*darwin*)
             _cmake_extra+=(-DCMAKE_SYSTEM_NAME=Darwin)
@@ -134,7 +122,6 @@ build() {
         -DCMAKE_CXX_COMPILER="$CXX" \
         -DCMAKE_CROSSCOMPILING=ON \
         -DLLVM_HOST_TRIPLE="$MSYS_CROSS_HOST" \
-        "${_tablegen_flag[@]}" \
         "${_cmake_extra[@]}" \
         -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
         -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
