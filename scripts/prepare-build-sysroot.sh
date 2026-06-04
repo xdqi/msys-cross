@@ -53,10 +53,15 @@ echo "=== Installing mingw64 sysroot ==="
 # libstdc++, libgfortran, crt, C++ headers) by copying them out of this sysroot
 # via `pacman -Ql` (see scripts/extract-target-libs.sh::copy_sysroot_pkg). Letting
 # pacman install them resolves the right version/triple/layout automatically.
+# binutils: the native <triple>-{as,ld,objdump}.exe live in the -binutils package (gcc
+# only depends on it, doesn't bundle it). Needed for the wine wrappers used by GCC 16's
+# secrel32 configure probe on the darwin host (prepare-build-sysroot generates as/ld/objdump
+# wrappers from these; the gcc.exe wrapper comes from the -gcc package).
 _pacman -Sy \
     mingw-w64-x86_64-headers mingw-w64-x86_64-crt \
     mingw-w64-x86_64-winpthreads mingw-w64-x86_64-gcc-libs \
     mingw-w64-x86_64-zlib mingw-w64-x86_64-windows-default-manifest \
+    mingw-w64-x86_64-binutils \
     mingw-w64-x86_64-gcc mingw-w64-x86_64-gcc-fortran
 
 echo "=== Installing mingw32 sysroot ==="
@@ -71,6 +76,7 @@ _pacman -Sy \
     mingw-w64-i686-headers mingw-w64-i686-crt \
     mingw-w64-i686-winpthreads mingw-w64-i686-gcc-libs \
     mingw-w64-i686-zlib mingw-w64-i686-windows-default-manifest \
+    mingw-w64-i686-binutils \
     mingw-w64-i686-gcc
 
 echo "=== Installing ucrt64 sysroot ==="
@@ -78,6 +84,7 @@ _pacman -Sy \
     mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt \
     mingw-w64-ucrt-x86_64-winpthreads mingw-w64-ucrt-x86_64-gcc-libs \
     mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-windows-default-manifest \
+    mingw-w64-ucrt-x86_64-binutils \
     mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran
 
 echo "=== Installing cygwin/msys sysroot ==="
@@ -89,7 +96,7 @@ echo "=== Installing cygwin/msys sysroot ==="
 # gcc-fortran (the cygwin port ships no Fortran).
 _pacman -Sy \
     msys2-runtime-devel msys2-w32api-headers msys2-w32api-runtime \
-    gcc
+    binutils gcc
 
 echo "=== Generating wine specs-helpers (for darwin/foreign-host GCC builds) ==="
 # A Canadian-cross GCC build (build=linux, host=foreign e.g. arm64 macOS, target=mingw/
@@ -174,14 +181,19 @@ WRAP
     for _tr in "${!_TOOLS_SUB[@]}"; do
         _sub="${_TOOLS_SUB[$_tr]}"
         _exedir="$OUT/$_sub/bin"
-        # ucrt's native binutils are named x86_64-w64-mingw32-* (same as mingw64) in the
-        # ucrt64 sysroot; cygwin uses its own x86_64-pc-cygwin-* prefix.
+        # Per-target native binutils naming differs by repo:
+        #   mingw64/mingw32  -> triple-prefixed in <sub>/bin (x86_64-w64-mingw32-as.exe etc.)
+        #   ucrt64           -> internally the mingw32 triple (x86_64-w64-mingw32-*), in ucrt64/bin
+        #   cygwin (msys repo) -> BARE names in usr/bin (as.exe/ld.exe/objdump.exe); the
+        #                         triple-prefixed copies live under usr/x86_64-pc-cygwin/bin.
+        # _bprefix is the filename prefix ("" = bare). _exedir is where they live.
         case "$_tr" in
-            x86_64-w64-mingw32ucrt) _bprefix=x86_64-w64-mingw32 ;;
-            *)                      _bprefix=$_tr ;;
+            x86_64-w64-mingw32ucrt) _bprefix="x86_64-w64-mingw32-" ;;
+            x86_64-pc-cygwin)       _bprefix="" ;;
+            *)                      _bprefix="${_tr}-" ;;
         esac
         for _tool in as ld objdump; do
-            _exe="${_bprefix}-${_tool}.exe"
+            _exe="${_bprefix}${_tool}.exe"
             if [ ! -x "$_exedir/$_exe" ]; then
                 echo "  WARNING: native $_tool.exe not found for $_tr ($_exedir/$_exe) — skip"
                 continue
