@@ -88,7 +88,17 @@ build() {
     # on linux it must stay unset (setting it to Linux would still trip the same probes).
     local _cmake_extra=()
     case "$ZIG_TARGET" in
-        *macos*|*darwin*) _cmake_extra+=(-DCMAKE_SYSTEM_NAME=Darwin) ;;
+        *macos*|*darwin*)
+            _cmake_extra+=(-DCMAKE_SYSTEM_NAME=Darwin)
+            # CMAKE_BUILD_WITH_INSTALL_RPATH=ON: with the Ninja generator on a Mach-O target,
+            # cmake refuses the install-time RPATH relink ("requires changing an RPATH from
+            # the build tree, but this is not supported with the Ninja generator unless on an
+            # ELF-based or XCOFF-based platform") and the generate step fails for every llvm
+            # tool. Building with the install RPATH baked in skips that relink — the right
+            # choice for a packaged toolchain anyway (binaries ship with their final RPATH).
+            # Linux (ELF) supports the relink, so this is darwin-only.
+            _cmake_extra+=(-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
+            ;;
     esac
     rm -rf "$_blddir"
     cmake -G Ninja -S "$_srcname/llvm" -B "$_blddir" \
