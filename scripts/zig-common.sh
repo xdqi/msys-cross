@@ -104,10 +104,16 @@ ZIG_WNO=(
 # can't parse (-Wconditionally-supported, -Wshadow=local — each would warn "unknown
 # warning option"). Functional -Werror=narrowing / -Wno-error=* forms are exact-match
 # and preserved. Also detect a compile invocation (-c/-E/-S).
-# Also drops legacy Mach-O libtool linker flags zig's ld rejects (-single_module,
-# -bind_at_load) — autoconf/libtool emit these on a darwin host (e.g. isl's test progs)
-# and they're harmless to omit. These tokens never appear on a Linux build, so the
-# Linux path is unaffected.
+# Also drops Mach-O ld64 linker flags zig's self-hosted Mach-O linker rejects:
+#   -single_module, -bind_at_load   — legacy libtool flags autoconf/libtool emit on a
+#                                      darwin host (e.g. isl's test progs); harmless to omit.
+#   -Wl,-sectcreate,__TEXT,__info_plist,<path>  — LLVM's clang driver CMakeLists (if APPLE)
+#       embeds an Info.plist into the clang binary's __TEXT,__info_plist section via this
+#       ld64-only flag (for macOS code-signing/notarization). zig's Mach-O linker has no
+#       -sectcreate → "error: unsupported linker arg: -sectcreate". The plist is irrelevant
+#       for a cross-built CLI clang. cmake emits it as one self-contained comma-joined -Wl,
+#       token, so drop that whole token via a prefix match.
+# These tokens never appear on a Linux build, so the Linux path is unaffected.
 # Outputs: ZIG_ARGS=(filtered args), ZIG_IS_COMPILE=true|false.
 zig_filter_args() {
     ZIG_ARGS=()
@@ -119,6 +125,7 @@ zig_filter_args() {
             -Wall|-Wextra|-W|-Werror) continue ;;
             -Wconditionally-supported|-Wshadow=local) continue ;;
             -single_module|-bind_at_load) continue ;;
+            -Wl,-sectcreate,*) continue ;;
         esac
         ZIG_ARGS+=("$a")
     done
