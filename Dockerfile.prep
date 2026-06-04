@@ -1,0 +1,48 @@
+# Prep image for the msys2-cross parallel CI build.
+#
+# Bakes Steps 0-3 (host tools + builduser, zig, MSYS2 sysroots + wine helpers, and BOTH
+# hosts' static deps) into one image so the 10 build cells boot ready — Step 0-3 runs ONCE
+# here, not per cell. The cells run `build.sh <linux|darwin> chain:<t>` / `clang`; the two
+# collect jobs run `build.sh <host> assemble`.
+#
+# Built+pushed by the build-prep-image job (docker/build-push-action, buildx) to
+# ghcr.io/<owner>/msys2-cross-prep. Internally cached via buildx layer cache so an unchanged
+# rebuild is near-instant; the heavy bits (linux deps from source) only re-run when their
+# inputs change.
+FROM archlinux/archlinux:base-devel
+
+# Step 0 host tool set (same union list as build.sh Step 0) + git/nodejs/github-cli that the
+# checkout/release actions need inside the container. Done as its own early layer so it caches
+# independently of the repo contents.
+RUN pacman -Syu --noconfirm --noprogressbar && \
+    pacman -S --noconfirm --noprogressbar --needed \
+        base-devel curl git zstd sudo llvm meson cmake gperf wine \
+        nodejs github-cli && \
+    pacman -Scc --noconfirm
+
+# Unprivileged build user (makepkg refuses root). Created here so cells inherit it.
+RUN id builduser >/dev/null 2>&1 || { useradd -m builduser && \
+    echo "builduser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers; }
+
+# The repo is COPYed in so prep can run prepare-zig / prepare-build-sysroot / build_deps
+# against the pinned scripts + submodules. The CI build context is the checked-out repo
+# (submodules already materialized by actions/checkout). Copy late so earlier tool layers
+# stay cached across repo changes.
+WORKDIR /opt/msys-cross
+COPY . .
+
+# Mark the tree safe for git (COPYed as root; build.sh / submodule reads need it).
+RUN git config --global --add safe.directory /opt/msys-cross && \
+    git config --global --add safe.directory '*'
+
+# Run prep for BOTH hosts. Each `build.sh <host> prep` does Steps 0-3; Step 0's pacman is a
+# near-noop here (tools already installed above), and the heavy work is zig + sysroots + that
+# host's deps. The outputs land under build/ and deps/ inside the image.
+#   linux  deps -> deps/install-x86_64-linux-gnu.2.11 (built from source)
+#   darwin deps -> deps/install-aarch64-macos.11.0    (Homebrew bottles via curl)
+# Both hosts share build/bootstrap-prefix (MSYS2 sysroots + wine specs/as/ld/objdump helpers).
+RUN bash scripts/build.sh linux  prep && \
+    bash scripts/build.sh darwin prep && \
+    chown -R builduser:builduser build deps 2>/dev/null || true
+
+# Cells will `cd /opt/msys-cross` and run their phase; the workflow sets the working dir.

@@ -27,6 +27,32 @@ case "$TARGET" in
         ;;
 esac
 
+# Phase selector — lets CI split the monolithic build across parallel runners while
+# keeping `build.sh <target>` (= `all`) working verbatim for local dev / fallback.
+#   all (default)        Steps 0-6 in one process (the original behaviour)
+#   prep                 Steps 0-3 only (baked into the prep container image)
+#   chain:<mingw64|mingw32|ucrt64|cygwin>
+#                        foundation installs + binutils-<t> -> install -> gcc-<t>
+#                        (cygwin uses msys-cross-cygwin-gcc). Assumes prep already ran.
+#   clang                Step 4b only. Assumes prep already ran.
+#   assemble             Steps 5-6 (repo-add db + installer) over a populated PKGDEST.
+# A chain/clang/assemble phase expects the prep outputs (zig, sysroots, deps) present —
+# in CI they come from the prep image; locally, run `build.sh <target> prep` first.
+PHASE="${2:-all}"
+CHAIN_TARGET=""
+case "$PHASE" in
+    all|prep|clang|assemble) ;;
+    chain:*) CHAIN_TARGET="${PHASE#chain:}"
+        case "$CHAIN_TARGET" in
+            mingw64|mingw32|ucrt64|cygwin) ;;
+            *) echo "error: chain target must be mingw64|mingw32|ucrt64|cygwin (got '$CHAIN_TARGET')" >&2; exit 1 ;;
+        esac ;;
+    *)
+        echo "error: unknown phase '$PHASE' (expected: all | prep | chain:<target> | clang | assemble)" >&2
+        exit 1
+        ;;
+esac
+
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
@@ -105,8 +131,23 @@ echo
 # Cross-binutils from install prefix must be in PATH for GCC builds
 export PATH="$INSTALL_PREFIX/bin:$PATH"
 
-# ---- Step 0: Install host build tools ----
+# Per-phase gates. `all` runs everything; the split phases run only their slice.
+_do_prep=false; _do_chain=false; _do_clang=false; _do_assemble=false
+case "$PHASE" in
+    all)      _do_prep=true; _do_chain=true; _do_clang=true; _do_assemble=true ;;
+    prep)     _do_prep=true ;;
+    chain:*)  _do_chain=true ;;
+    clang)    _do_clang=true ;;
+    assemble) _do_assemble=true ;;
+esac
+# The split phases (chain/clang/assemble) run inside the prep container image, which already
+# has the host tools + builduser + zig/sysroots/deps from the `prep` phase. They still need
+# the shared helpers and builduser to exist; Step 0 below installs tools only when prepping,
+# but always ensures builduser + sources build-common.sh.
+
+# ---- Step 0: Install host build tools (prep only) ----
 echo "=== Installing host build tools ==="
+if $_do_prep; then
 pacman -Syu --noconfirm --noprogressbar 2>&1 | tail -2
 # Union host package list for both targets:
 # llvm: provides llvm-nm, which build_deps.sh uses as NM for cross targets — the host
@@ -114,18 +155,21 @@ pacman -Syu --noconfirm --noprogressbar 2>&1 | tail -2
 # meson/cmake/gperf: makedeps of the from-source pacman build.
 # wine: runs the GCC specs-helpers on the darwin Canadian-cross (harmless on linux).
 pacman -S --noconfirm --noprogressbar --needed base-devel curl git zstd sudo llvm meson cmake gperf wine 2>&1 | tail -2
+fi  # _do_prep (host tool install)
 
-# Create unprivileged build user (makepkg refuses to run as root)
+# Create unprivileged build user (makepkg refuses to run as root). Needed by ALL phases —
+# the prep image already has it, but creating-if-absent is idempotent and keeps `all` working.
 if ! id builduser >/dev/null 2>&1; then
     useradd -m builduser
     echo "builduser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 fi
 echo
 
-# Shared build helpers: run_as_builduser, build_pkg, install_local.
+# Shared build helpers: run_as_builduser, build_pkg, install_local. Needed by every phase.
 source "$SCRIPTS_DIR/build-common.sh"
 
-# ---- Step 1: Prepare zig ----
+# ---- Step 1: Prepare zig (prep only) ----
+if $_do_prep; then
 echo "===== Step 1: Prepare Zig ====="
 bash "$SCRIPTS_DIR/prepare-zig.sh"
 
@@ -160,60 +204,75 @@ else
     # as the gcc/binutils phase.
     run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
 fi
+fi  # _do_prep (Steps 1-3)
 
-# build_pkg / install_local now live in build-common.sh (sourced above).
+# build_pkg / install_local live in build-common.sh (sourced above, every phase).
 
-# ---- Step 4: Build packages in dependency order ----
-echo ""
-echo "===== Step 4: Build packages ====="
+# ---- Foundation packages ----
+# The few cheap packages binutils/gcc need installed locally (filesystem/ca-certs/pacman/
+# pkgconfig). Built+installed for `all` and for EVERY chain cell (each cell has its own
+# per-runner INSTALL_PREFIX). Tiny (pacman -Udd of small pkgs), so the per-cell duplication
+# is negligible. Also for clang (its build wants pkgconfig wrappers on PATH).
+_build_foundation() {
+    echo ""
+    echo "===== Foundation packages ====="
+    build_pkg "msys-cross-filesystem"      "$MAKEPKG_ARGS"
+    build_pkg "msys-cross-ca-certificates" "$MAKEPKG_ARGS"
+    build_pkg "msys-cross-pacman"          "$MAKEPKG_ARGS"
+    install_local "msys-cross-filesystem-*.pkg.tar.*"
+    install_local "msys-cross-ca-certificates-*.pkg.tar.*"
+    install_local "msys-cross-pacman-*.pkg.tar.*"
+    build_pkg "msys-cross-pkgconfig"       "$MAKEPKG_ARGS"
+    install_local "msys-cross-pkgconfig-*.pkg.tar.*"
+}
 
-# Foundation packages
-build_pkg "msys-cross-filesystem"      "$MAKEPKG_ARGS"
-build_pkg "msys-cross-ca-certificates" "$MAKEPKG_ARGS"
-build_pkg "msys-cross-pacman"          "$MAKEPKG_ARGS"
-
-install_local "msys-cross-filesystem-*.pkg.tar.*"
-install_local "msys-cross-ca-certificates-*.pkg.tar.*"
-install_local "msys-cross-pacman-*.pkg.tar.*"
-
-# Cross pkg-config wrappers
-build_pkg "msys-cross-pkgconfig"       "$MAKEPKG_ARGS"
-install_local "msys-cross-pkgconfig-*.pkg.tar.*"
-
-# Binutils (GCC needs as/ld in PATH). One makepkg run per target so each gets its
-# own per-target -debug package (msys-cross-<target>-binutils-debug); the shared
-# binutils-common rides the mingw64 run. MSYS_CROSS_TARGET is exported for the
-# whole iteration (build_pkg + run_as_builduser pick it up); unset after the loop.
-for _t in mingw64 mingw32 ucrt64 cygwin; do
+# ---- One target's binutils -> gcc chain ----
+# gcc-<t> needs ONLY binutils-<t>'s as/ld on PATH (triple-prefixed), so each target's
+# binutils->gcc is a self-contained unit: build binutils, install it locally, build gcc.
+# No cross-target binutils needed → cells are independent. The cygwin chain uses the
+# separate msys-cross-cygwin-gcc PKGBUILD (fixed triple) instead of the looped msys-cross-gcc.
+_build_chain() {
+    local _t="$1"
+    echo ""
+    echo "===== Chain: $_t (binutils -> gcc) ====="
     export MSYS_CROSS_TARGET="$_t"
     build_pkg "msys-cross-binutils" "$MAKEPKG_ARGS"
-done
-unset MSYS_CROSS_TARGET
+    # binutils-common (the target-independent BFD plugin) is produced ONLY by the mingw64
+    # binutils run (see pkgs/msys-cross-binutils/PKGBUILD: pkgname gains binutils-common iff
+    # _mct=mingw64). gcc-<t> only needs the triple-prefixed <t>-binutils as/ld on PATH, not
+    # the plugin, so non-mingw64 chains don't install it (the file doesn't exist in their
+    # PKGDEST). The mingw64 cell's artifact carries binutils-common to the collect job, which
+    # repo-adds it into the shared repo so every <t>-binutils's dependency resolves there.
+    if [ "$_t" = mingw64 ]; then
+        install_local "msys-cross-binutils-common-*.pkg.tar.*"
+    fi
+    install_local "msys-cross-${_t}-binutils-*.pkg.tar.*"
+    if [ "$_t" = cygwin ]; then
+        unset MSYS_CROSS_TARGET
+        build_pkg "msys-cross-cygwin-gcc" "$MAKEPKG_ARGS"
+        install_local "msys-cross-cygwin-gcc-*.pkg.tar.*"
+    else
+        build_pkg "msys-cross-gcc" "$MAKEPKG_ARGS"
+        unset MSYS_CROSS_TARGET
+        install_local "msys-cross-${_t}-gcc-*.pkg.tar.*"
+    fi
+}
 
-install_local "msys-cross-binutils-common-*.pkg.tar.*"
-install_local "msys-cross-mingw64-binutils-*.pkg.tar.*"
-install_local "msys-cross-mingw32-binutils-*.pkg.tar.*"
-install_local "msys-cross-ucrt64-binutils-*.pkg.tar.*"
-install_local "msys-cross-cygwin-binutils-*.pkg.tar.*"
-
-# GCC (mingw64/32/ucrt). One makepkg run per target so each gets its own per-target
-# -debug package (msys-cross-<target>-gcc-debug); a target's -gcc and -gcc-fortran
-# sub-packages share that one -debug. mingw32 has no fortran sub-package. On darwin the
-# GCC specs/self-test use the wine specs-helper (all-gcc never executes target as/ld).
-for _t in mingw64 mingw32 ucrt64; do
-    export MSYS_CROSS_TARGET="$_t"
-    build_pkg "msys-cross-gcc" "$MAKEPKG_ARGS"
-done
-unset MSYS_CROSS_TARGET
-
-install_local "msys-cross-mingw64-gcc-*.pkg.tar.*"
-install_local "msys-cross-mingw32-gcc-*.pkg.tar.*"
-install_local "msys-cross-ucrt64-gcc-*.pkg.tar.*"
-
-# Cygwin GCC (separate PKGBUILD, fixed triple x86_64-pc-cygwin)
-build_pkg "msys-cross-cygwin-gcc" "$MAKEPKG_ARGS"
-
-install_local "msys-cross-cygwin-gcc-*.pkg.tar.*"
+# ---- Step 4: Build packages ----
+# `all`  -> foundation + all four chains (mingw64 first so binutils-common is produced once).
+# chain:<t> -> foundation + that one chain only (a single CI cell).
+if $_do_chain; then
+    echo ""
+    echo "===== Step 4: Build packages ====="
+    _build_foundation
+    if [ -n "$CHAIN_TARGET" ]; then
+        _build_chain "$CHAIN_TARGET"
+    else
+        for _t in mingw64 mingw32 ucrt64 cygwin; do
+            _build_chain "$_t"
+        done
+    fi
+fi
 
 # ---- Step 4b: Clang cross toolchain (both hosts) ----
 # clang is a single driver: ONE self-built clang+lld serves every Windows target via
@@ -225,40 +284,47 @@ install_local "msys-cross-cygwin-gcc-*.pkg.tar.*"
 # for the linux host (x86_64 ELF) and the darwin host (arm64 Mach-O); build() branches on
 # ZIG_TARGET. $MAKEPKG_ARGS carries the per-target makepkg flags (darwin: --ignorearch +
 # the darwin --config via MSYS_CROSS_MAKEPKG_CONFIG); linux leaves it empty for the default.
-if $BUILD_CLANG; then
+if $_do_clang && $BUILD_CLANG; then
     echo ""
     echo "===== Step 4b: Clang cross toolchain ====="
     build_pkg "msys-cross-clang" "$MAKEPKG_ARGS"  # all three split packages (pkgbase=msys-cross-clang)
     install_local "msys-cross-clang-*.pkg.tar.*"
 fi
 
-# ---- Step 5: Create repo database ----
-echo ""
-echo "===== Step 5: Repo database ====="
-rm -f "$PKGDEST/$DB_NAME.db" "$PKGDEST/$DB_NAME.db.tar.gz" "$PKGDEST/$DB_NAME.files" "$PKGDEST/$DB_NAME.files.tar.gz"
+# ---- Step 5-6: Assemble repo + installer (assemble phase) ----
+# In the split topology this runs in the per-host collect job over a PKGDEST already
+# populated with every cell's *.pkg.tar.* artifacts; for `all` it runs inline as before.
+if $_do_assemble; then
+    # ---- Step 5: Create repo database ----
+    echo ""
+    echo "===== Step 5: Repo database ====="
+    rm -f "$PKGDEST/$DB_NAME.db" "$PKGDEST/$DB_NAME.db.tar.gz" "$PKGDEST/$DB_NAME.files" "$PKGDEST/$DB_NAME.files.tar.gz"
 
-shopt -s nullglob
-for pkg in "$PKGDEST"/*.pkg.tar.*; do
-    repo-add "$PKGDEST/$DB_NAME.db.tar.gz" "$pkg"
-done
-shopt -u nullglob
+    shopt -s nullglob
+    for pkg in "$PKGDEST"/*.pkg.tar.*; do
+        repo-add "$PKGDEST/$DB_NAME.db.tar.gz" "$pkg"
+    done
+    shopt -u nullglob
 
-# ---- Step 6: Build installer ----
-# Darwin set INSTALLER_DIR / PACMAN_CONF / BOOTSTRAP_TARBALL in the config block above;
-# linux uses build_installer.sh's defaults (with the linux installer dir below).
-echo ""
-echo "===== Step 6: Build installer ====="
-export INSTALLER_DIR="${INSTALLER_DIR:-$PROJECT_ROOT/installer}"
-bash "$SCRIPTS_DIR/build_installer.sh"
+    # ---- Step 6: Build installer ----
+    # Darwin set INSTALLER_DIR / PACMAN_CONF / BOOTSTRAP_TARBALL in the config block above;
+    # linux uses build_installer.sh's defaults (with the linux installer dir below).
+    echo ""
+    echo "===== Step 6: Build installer ====="
+    export INSTALLER_DIR="${INSTALLER_DIR:-$PROJECT_ROOT/installer}"
+    bash "$SCRIPTS_DIR/build_installer.sh"
+fi
 
 echo ""
-echo "===== Build complete (target=$TARGET) ====="
+echo "===== Build complete (target=$TARGET, phase=$PHASE) ====="
 echo "Repo: $PKGDEST"
 ls "$PKGDEST"/*.pkg.tar.* 2>/dev/null | while read -r f; do
     echo "  $(basename "$f")"
 done
-echo ""
-echo "Database:"
-ls -la "$PKGDEST/$DB_NAME.db.tar.gz"
+if $_do_assemble; then
+    echo ""
+    echo "Database:"
+    ls -la "$PKGDEST/$DB_NAME.db.tar.gz" 2>/dev/null || echo "  (no db — nothing assembled)"
+fi
 [ "$TARGET" = darwin ] && df -h "$PROJECT_ROOT" | tail -1
 echo "Done."

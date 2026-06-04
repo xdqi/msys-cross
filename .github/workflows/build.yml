@@ -1,14 +1,15 @@
-# Build the full msys2-cross toolchain repo on GitHub Actions.
+# Build the full msys2-cross toolchain repo on GitHub Actions — PARALLEL topology.
 #
-# The build runs inside an Arch Linux container because scripts/build.sh drives
-# the host package manager directly (`pacman -Syu`). Everything else — Zig, the
-# MSYS2 sysroots, and the gmp/mpfr/mpc/isl/zlib/zstd source tarballs — is fetched
-# inside the container, so the workflow is essentially `bash scripts/build.sh`.
-#
-# Output: the pacman repo under repo/ (toolchain packages + msys-cross.db +
-# bootstrap.tar.xz), uploaded as build artifacts and, on push to main, published
-# to a GitHub Release tagged YYYYMMDD.N — which is what the msys-mirror service
-# serves (packages live as release assets, GitHub provides storage + CDN).
+# Steps 0-3 (host tools, zig, MSYS2 sysroots + wine helpers, BOTH hosts' static deps) are
+# baked ONCE into a prep container image (build-prep-image job → ghcr). Then 10 cells run in
+# parallel, each `container:` that image: per host (linux x86_64, darwin arm64-macOS) a
+# [binutils→gcc] chain for each of mingw64/mingw32/ucrt64/cygwin plus a clang cell. gcc-<t>
+# needs only binutils-<t>, so each chain is self-contained in one cell — no cross-cell deps,
+# no artifact-of-binutils. Each cell uploads its *.pkg.tar.* as an artifact. Two collect jobs
+# (one per host) download all of that host's cell artifacts into PKGDEST, run Step 5-6
+# (repo-add + installer), and publish the GitHub Release — a single fan-in point per tag, so
+# no multi-writer race. Compiler cache is the shared external SeaweedFS S3 bucket (sccache),
+# so all cells/runs share one hot cache.
 name: build
 
 on:
@@ -18,64 +19,107 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# One in-flight build per ref; a newer push cancels the older run.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
-# Needed by the release step (gh release create/upload) on push to main.
 permissions:
   contents: write
+  packages: write   # push the prep image to ghcr
+
+env:
+  PREP_IMAGE: ghcr.io/${{ github.repository_owner }}/msys2-cross-prep
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # Prep image: Steps 0-3 for BOTH hosts, baked into one image and pushed to ghcr.
+  # buildx layer cache (type=gha) makes an unchanged rebuild near-instant; a change to
+  # build_deps.sh / sysroot scripts only re-runs the affected layer.
+  # ---------------------------------------------------------------------------
+  build-prep-image:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux/archlinux:base-devel
-      # base-devel image ships the makepkg toolchain; build.sh still runs
-      # `pacman -Syu` and creates an unprivileged builduser, so it needs root
-      # inside the container (the default for GHA service containers).
     timeout-minutes: 180
-
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
     steps:
-      # actions/checkout shells out to git; the minimal Arch image ships neither
-      # git nor the node the action needs. github-cli (gh) is for the release
-      # step — the whole job runs in this container, so gh must live here too.
-      - name: Install prerequisites
-        run: pacman -Sy --noconfirm --needed git nodejs github-cli
-
-      - name: Checkout (with MSYS2-packages submodule)
+      - name: Checkout (with submodules)
         uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      # The repo is checked out as root but git refuses to operate on a tree owned
-      # by another uid once builduser is involved; mark it safe pre-emptively.
-      # '*' also covers the MSYS2-packages submodule (rev-parse'd below).
-      - name: Mark workspace as safe for git
+      - name: Compute image tag
+        id: meta
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory '*'
+          # Tag by the short SHA so each commit's cells pull exactly the image built from it.
+          tag="sha-${GITHUB_SHA::12}"
+          echo "image=${PREP_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
-      # Compiler cache. The zigcc/zigc++ wrappers route `zig cc`/`zig c++` through
-      # sccache when SCCACHE_PATH is set (they hand it a single-exec shim so sccache
-      # — which can't parse the two-token `zig cc` — sees a cacheable clang). This
-      # turns the ~1.5h cold gcc/binutils compile into a near-cache-hit rebuild on
-      # re-runs. Only the sccache BINARY is needed from this action; the backend is
-      # configured below.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build + push the prep image. The prep step inside the Dockerfile builds the linux
+      # deps from source (the heavy bit) and fetches darwin bottles; buildx gha cache keeps
+      # an unchanged rebuild fast. The compile-cache (sccache) is NOT used here — prep does
+      # not compile gcc/binutils, only the small static deps; those go through zig directly.
+      - name: Build and push prep image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.prep
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Build cells: 2 hosts × {4 chains + clang} = 10 cells, all from the prep image.
+  # ---------------------------------------------------------------------------
+  cell:
+    needs: build-prep-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: ${{ needs.build-prep-image.outputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [linux, darwin]
+        phase: [chain:mingw64, chain:mingw32, chain:ucrt64, chain:cygwin, clang]
+        # darwin cells are skipped on PRs via the step-level gate below (matrix exclude can't
+        # read github.event_name), so all 10 (host × phase) combinations are declared here.
+    steps:
+      - name: Skip darwin on PRs
+        id: gate
+        run: |
+          if [ "${{ matrix.host }}" = darwin ] && [ "${{ github.event_name }}" = pull_request ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "darwin cells are not built on PRs — skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The prep image already contains the repo at /opt/msys-cross with prep outputs. Use it
+      # as the working tree so build/ and deps/ from the image are present.
+      - name: Enter prep workspace
+        if: steps.gate.outputs.skip != 'true'
+        run: echo "WS=/opt/msys-cross" >> "$GITHUB_ENV"
+
       - name: Set up sccache
+        if: steps.gate.outputs.skip != 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
         with:
           version: "v0.10.0"
-      # sccache backend = external SeaweedFS S3 (self-hosted, US). Replaces the old
-      # local-disk + single-packed-actions/cache scheme: GitHub hard-capped the
-      # actions-cache API (200 uploads/min/repo, 2026-01) which throttled sccache's
-      # ~10k tiny objects; S3 has no such limit and lets every job/run share one hot
-      # bucket. SeaweedFS specifics: path-style (virtual-host-style left unset),
-      # region ignored by its SigV4 verifier (=auto), no SSE. The zigcc/zigc++
-      # wrappers already route through $SCCACHE_PATH; the backend is pure env.
-      # Secrets absent (e.g. fork PRs) → sccache just misses, build still works.
+
       - name: Configure sccache (S3 backend)
+        if: steps.gate.outputs.skip != 'true'
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
@@ -97,76 +141,84 @@ jobs:
             echo "::warning::SCCACHE_S3_* secrets absent — sccache will run with no backend (every compile a miss)."
           fi
 
-      # The gcc/binutils versions are NOT in our PKGBUILDs — inherit_msys2 greps
-      # them from the MSYS2-packages submodule at build time. So the pkg-source
-      # cache must key on the submodule's pinned commit, or a version bump there
-      # would silently reuse a cache of the old version's tarballs.
-      - name: Resolve MSYS2-packages submodule commit
-        id: submodule
-        run: |
-          sha="$(git -C deps/MSYS2-packages rev-parse HEAD)"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "MSYS2-packages @ $sha"
-
-      # Cache the downloaded source tarballs so a re-run doesn't re-fetch from
-      # upstream (gmplib.org etc. time out from runners — the original failure).
-      # get_tarball writes completed files only (.part + mv), so a cache save
-      # after a failed build never stores a truncated tarball.
-      #
-      # Static deps (gmp/mpfr/mpc/isl/zlib/zstd): keyed by build_deps.sh, which
-      # holds all the *_VER defaults — a version bump changes the hash → new cache.
-      - name: Cache static-dep source tarballs
-        uses: actions/cache@v5
-        with:
-          path: build/.deps-src
-          key: deps-src-${{ runner.os }}-${{ hashFiles('scripts/build_deps.sh') }}
-          restore-keys: |
-            deps-src-${{ runner.os }}-
-
-      # pkg sources (gcc/binutils upstream tarballs makepkg fetches into SRCDEST):
-      # keyed by the submodule commit (the real source of the gcc/binutils
-      # versions) AND the local pkgs/ (our PKGBUILDs + patches). Stale restores are
-      # safe — makepkg re-validates checksums and only re-downloads what changed.
-      - name: Cache pkg source tarballs
-        uses: actions/cache@v5
-        with:
-          path: build/sources
-          key: pkg-src-${{ runner.os }}-${{ steps.submodule.outputs.sha }}-${{ hashFiles('pkgs/**') }}
-          restore-keys: |
-            pkg-src-${{ runner.os }}-${{ steps.submodule.outputs.sha }}-
-            pkg-src-${{ runner.os }}-
-
-      # build.sh frees each package's scratch BUILDDIR right after that package
-      # is built, so peak disk is ~one toolchain build tree at a time rather than
-      # all of them — no host-level disk reclaim (maximize-build-space / LVM) is
-      # needed, and none would work inside this container job anyway.
-      - name: Build toolchain repo
-        run: bash scripts/build.sh
+      # clang is built once per host (BUILD_CLANG=true both); the chain phases build their
+      # one target's binutils→gcc. The prep image's repo tree already has Steps 0-3 done.
+      - name: Build cell (${{ matrix.host }} ${{ matrix.phase }})
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: /opt/msys-cross
+        run: bash scripts/build.sh ${{ matrix.host }} ${{ matrix.phase }}
 
       - name: sccache stats
-        if: always()
+        if: ${{ always() && steps.gate.outputs.skip != 'true' }}
         run: "${SCCACHE_PATH:-sccache} --show-stats || true"
 
-      - name: Summarize repo
+      # Each cell uploads its produced packages. PKGDEST is repo/ (linux) or repo-darwin/
+      # (darwin); the artifact name is unique per (host, phase) so the collect job can grab
+      # them all. A sanitized phase (": " → "-") keeps the artifact name valid.
+      - name: Compute artifact name
+        if: steps.gate.outputs.skip != 'true'
+        id: art
         run: |
-          echo "=== Packages ==="
-          ls -lh repo/*.pkg.tar.* 2>/dev/null || true
-          echo "=== Database ==="
-          ls -lh repo/msys-cross.db* repo/msys-cross.files* 2>/dev/null || true
-          echo "=== Bootstrap ==="
-          ls -lh repo/bootstrap.tar.xz 2>/dev/null || true
+          ph="$(echo '${{ matrix.phase }}' | tr ':' '-')"
+          echo "name=pkgs-${{ matrix.host }}-${ph}" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.host }}" = darwin ]; then
+            echo "dir=repo-darwin" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=repo" >> "$GITHUB_OUTPUT"
+          fi
 
-      # Build artifacts (kept for PRs and as a fallback to the release). The
-      # gcc/binutils packages are now stripped with split debug symbols, so the
-      # main packages are small and a separate *-debug package carries symbols.
+      - name: Upload cell packages
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.art.outputs.name }}
+          path: /opt/msys-cross/${{ steps.art.outputs.dir }}/*.pkg.tar.*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Collect (linux): gather all linux cells' packages → repo-add + installer → release.
+  # ---------------------------------------------------------------------------
+  collect-linux:
+    needs: [build-prep-image, cell]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ${{ needs.build-prep-image.outputs.image }}
+    steps:
+      - name: Download all linux cell packages
+        uses: actions/download-artifact@v5
+        with:
+          pattern: pkgs-linux-*
+          path: /tmp/pkgs
+          merge-multiple: true
+
+      - name: Stage packages into repo/
+        working-directory: /opt/msys-cross
+        run: |
+          mkdir -p repo
+          cp -v /tmp/pkgs/*.pkg.tar.* repo/ 2>/dev/null || true
+          ls -lh repo/*.pkg.tar.* | head -50
+
+      - name: Assemble repo db + installer
+        working-directory: /opt/msys-cross
+        run: bash scripts/build.sh linux assemble
+
+      - name: Summarize repo
+        working-directory: /opt/msys-cross
+        run: |
+          echo "=== Packages ==="; ls -lh repo/*.pkg.tar.* 2>/dev/null || true
+          echo "=== Database ==="; ls -lh repo/msys-cross.db* repo/msys-cross.files* 2>/dev/null || true
+          echo "=== Bootstrap ==="; ls -lh repo/bootstrap.tar.xz 2>/dev/null || true
+
       - name: Upload pacman repo
         uses: actions/upload-artifact@v7
         with:
           name: msys-cross-repo
           path: |
-            repo/*.pkg.tar.*
-            repo/msys-cross.db*
-            repo/msys-cross.files*
+            /opt/msys-cross/repo/*.pkg.tar.*
+            /opt/msys-cross/repo/msys-cross.db*
+            /opt/msys-cross/repo/msys-cross.files*
           if-no-files-found: error
           retention-days: 14
 
@@ -174,152 +226,84 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: msys-cross-bootstrap
-          path: repo/bootstrap.tar.xz
+          path: /opt/msys-cross/repo/bootstrap.tar.xz
           if-no-files-found: error
           retention-days: 14
 
-      # Publish to a GitHub Release on push to main. The release assets are what
-      # the msys-mirror service serves (it 302-redirects pacman to them). The tag
-      # is build-YYYYMMDD.N (N = next sequence for today): the "build-" prefix keeps
-      # these out of any semantic-version tag space, and each tag is an immutable
-      # snapshot reachable at /archive/build-YYYYMMDD.N/, newest served at /repo/.
-      #
-      # No trigger loop: this workflow only fires on push to the main branch and on
-      # PRs — NOT on `push: tags:` — so creating the release tag does not re-run it.
       - name: Publish release
         if: github.event_name == 'push'
+        working-directory: /opt/msys-cross
         env:
-          # gh authenticates with this; GH_REPO pins the repo so gh doesn't have to
-          # infer it from git remotes (the checkout is owned by another uid here).
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           date_tag="$(date -u +%Y%m%d)"
-          # Count existing build- releases for today to pick the next .N.
           n="$(gh release list --limit 200 --json tagName \
                  --jq "[.[] | select(.tagName | startswith(\"build-${date_tag}.\"))] | length" \
                2>/dev/null || echo 0)"
           tag="build-${date_tag}.$((n + 1))"
           echo "Release tag: $tag"
-
-          # Assets: the pacman repo (packages + db/files) and the bootstrap tarball.
-          # repo-add wrote msys-cross.db/.files as symlinks; upload the real
-          # .tar.gz only (the mirror aliases the short names).
           assets=()
           for f in repo/*.pkg.tar.* repo/msys-cross.db.tar.gz repo/msys-cross.files.tar.gz repo/bootstrap.tar.xz; do
             [ -f "$f" ] && assets+=("$f")
           done
           echo "Uploading ${#assets[@]} assets"
-
           gh release create "$tag" "${assets[@]}" \
             --title "$tag" \
             --notes "Automated build from ${GITHUB_SHA}. Consumed by msys-mirror; pin via /archive/${tag}/." \
             --target "${GITHUB_SHA}"
 
   # ---------------------------------------------------------------------------
-  # Darwin (arm64 macOS host) toolchain — built in PARALLEL with the linux job.
-  # host = aarch64-apple-darwin (arm64 Mach-O), targets mingw32/64/ucrt64/cygwin,
-  # via zig cc on Linux. The GCC Canadian-cross specs pass uses a wine wrapper around
-  # the MSYS2-native gcc.exe in the build sysroot (no dependency on the linux build),
-  # so this job needs no `needs:` and runs concurrently. Output: a SEPARATE pacman repo
-  # repo-darwin/ + its own release tag build-darwin-YYYYMMDD.N. Skipped on PRs.
+  # Collect (darwin): same, for the arm64-macOS-host repo. Skipped on PRs.
   # ---------------------------------------------------------------------------
-  build-darwin:
-    runs-on: ubuntu-latest
+  collect-darwin:
+    needs: [build-prep-image, cell]
     if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     container:
-      image: archlinux/archlinux:base-devel
-    timeout-minutes: 180
-
+      image: ${{ needs.build-prep-image.outputs.image }}
     steps:
-      - name: Install prerequisites
-        run: pacman -Sy --noconfirm --needed git nodejs github-cli
-
-      - name: Checkout (with MSYS2-packages submodule)
-        uses: actions/checkout@v6
+      - name: Download all darwin cell packages
+        uses: actions/download-artifact@v5
         with:
-          submodules: recursive
+          pattern: pkgs-darwin-*
+          path: /tmp/pkgs
+          merge-multiple: true
 
-      - name: Mark workspace as safe for git
+      - name: Stage packages into repo-darwin/
+        working-directory: /opt/msys-cross
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory '*'
+          mkdir -p repo-darwin
+          cp -v /tmp/pkgs/*.pkg.tar.* repo-darwin/ 2>/dev/null || true
+          ls -lh repo-darwin/*.pkg.tar.* | head -50
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-        with:
-          version: "v0.10.0"
-      # sccache backend = external SeaweedFS S3 (self-hosted, US). Replaces the old
-      # local-disk + single-packed-actions/cache scheme: GitHub hard-capped the
-      # actions-cache API (200 uploads/min/repo, 2026-01) which throttled sccache's
-      # ~10k tiny objects; S3 has no such limit and lets every job/run share one hot
-      # bucket. SeaweedFS specifics: path-style (virtual-host-style left unset),
-      # region ignored by its SigV4 verifier (=auto), no SSE. The zigcc/zigc++
-      # wrappers already route through $SCCACHE_PATH; the backend is pure env.
-      # Secrets absent (e.g. fork PRs) → sccache just misses, build still works.
-      - name: Configure sccache (S3 backend)
-        env:
-          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET }}
-        run: |
-          {
-            echo "SCCACHE_PATH=${SCCACHE_PATH}"
-            echo "SCCACHE_REGION=auto"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "SCCACHE_S3_KEY_PREFIX=msys2-cross"
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-            echo "SCCACHE_BUCKET=${SCCACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}"
-            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
-          if [ -z "${SCCACHE_BUCKET}" ]; then
-            echo "::warning::SCCACHE_S3_* secrets absent — sccache will run with no backend (every compile a miss)."
-          fi
-
-      # Source tarballs (gmp/mpfr/...) are arch-independent — share the deps-src cache
-      # key with the linux job (same build_deps.sh hash).
-      - name: Cache static-dep source tarballs
-        uses: actions/cache@v5
-        with:
-          path: build/.deps-src
-          key: deps-src-${{ runner.os }}-${{ hashFiles('scripts/build_deps.sh') }}
-          restore-keys: |
-            deps-src-${{ runner.os }}-
-
-      - name: Build darwin toolchain repo
-        run: bash scripts/build.sh darwin
-
-      - name: sccache stats
-        if: always()
-        run: "${SCCACHE_PATH:-sccache} --show-stats || true"
+      - name: Assemble repo db + installer
+        working-directory: /opt/msys-cross
+        run: bash scripts/build.sh darwin assemble
 
       - name: Summarize darwin repo
+        working-directory: /opt/msys-cross
         run: |
-          echo "=== Darwin packages ==="
-          ls -lh repo-darwin/*.pkg.tar.* 2>/dev/null || true
-          echo "=== Darwin database ==="
-          ls -lh repo-darwin/msys-cross-darwin.db* 2>/dev/null || true
+          echo "=== Darwin packages ==="; ls -lh repo-darwin/*.pkg.tar.* 2>/dev/null || true
+          echo "=== Darwin database ==="; ls -lh repo-darwin/msys-cross-darwin.db* 2>/dev/null || true
 
       - name: Upload darwin pacman repo
         uses: actions/upload-artifact@v7
         with:
           name: msys-cross-darwin-repo
           path: |
-            repo-darwin/*.pkg.tar.*
-            repo-darwin/msys-cross-darwin.db*
-            repo-darwin/msys-cross-darwin.files*
-            repo-darwin/bootstrap-darwin.tar.xz
+            /opt/msys-cross/repo-darwin/*.pkg.tar.*
+            /opt/msys-cross/repo-darwin/msys-cross-darwin.db*
+            /opt/msys-cross/repo-darwin/msys-cross-darwin.files*
+            /opt/msys-cross/repo-darwin/bootstrap-darwin.tar.xz
           if-no-files-found: error
           retention-days: 14
 
-      # Separate release (independent tag space from the linux build-YYYYMMDD.N) so the
-      # mirror can serve an arm64-macOS-host repo under e.g. /darwin/.
       - name: Publish darwin release
         if: github.event_name == 'push'
+        working-directory: /opt/msys-cross
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
