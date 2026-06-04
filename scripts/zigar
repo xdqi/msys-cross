@@ -1,0 +1,15 @@
+#!/bin/bash
+# Generic single-path `zig ar` wrapper, for CMAKE_AR / $AR. Both take ONE path: cmake does
+# not word-split CMAKE_AR, and cmake ignores $AR entirely (it auto-detects the archiver from
+# the compiler toolchain and caches CMAKE_AR), so the cmake-built LLVM/clang needs an explicit
+# -DCMAKE_AR pointing here. The archive format is chosen from $ZIG_TARGET — the same branch
+# setup_zig_env (msys-cross-common.sh) used to inline into $AR: a macOS target needs
+# Mach-O/BSD archives (a plain `zig ar` defaults to GNU, and a GNU-format archive of Mach-O
+# .o makes zig's Mach-O LINKER reject the symbol table at link time with "unknown cpu
+# architecture: <number>" — it misreads the GNU symbol table as a cputype); every other
+# target keeps the default GNU format, byte-identical to a bare `zig ar`. Used by both
+# autoconf/meson ($AR) and cmake (CMAKE_AR) so the format decision lives in ONE place.
+case "${ZIG_TARGET:-}" in
+    *macos*|*darwin*) exec zig ar --format=darwin "$@" ;;
+    *)                exec zig ar "$@" ;;
+esac

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Generic single-path `zig ranlib` wrapper, for CMAKE_RANLIB / $RANLIB (both take ONE path).
+# Target-agnostic: ranlib only (re-)indexes an existing archive's symbol table; the archive
+# FORMAT (GNU vs Mach-O/BSD) is fixed at `ar` time by zigar, not here. Paired with zigar so
+# autoconf/meson ($RANLIB) and cmake (CMAKE_RANLIB) share one wrapper.
+exec zig ranlib "$@"

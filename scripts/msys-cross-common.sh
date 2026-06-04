@@ -150,15 +150,15 @@ setup_zig_env() {
     export PATH="$_install_prefix/bin:$_zig_path:$PATH"
     export CC="$_wrappers/zigcc"
     export CXX="$_wrappers/zigc++"
-    # On a macOS target, archives must be Mach-O/BSD format: a plain `zig ar` (defaults to
-    # gnu) produces a GNU-format archive of Mach-O .o that zig's Mach-O LINKER then rejects
-    # with "unknown cpu architecture" (it misreads the GNU symbol table). --format=darwin
-    # fixes it. On Linux keep the default gnu archive.
-    case "$ZIG_TARGET" in
-        *macos*|*darwin*) export AR="zig ar --format=darwin" ;;
-        *)                export AR="zig ar" ;;
-    esac
-    export RANLIB="zig ranlib"
+    # Archiver/ranlib: single-path wrappers in the same scripts/ dir as zigcc. zigar picks the
+    # archive format from $ZIG_TARGET (macOS → `zig ar --format=darwin`, else plain `zig ar`):
+    # a macOS target needs Mach-O/BSD archives, since a GNU-format archive of Mach-O .o makes
+    # zig's Mach-O LINKER reject the symbol table with "unknown cpu architecture". Single
+    # executables (not the old multi-word `zig ar --format=darwin`) so they also work as
+    # CMAKE_AR/CMAKE_RANLIB — cmake takes one path and ignores $AR entirely, so the cmake-built
+    # clang must point -DCMAKE_AR at zigar. One wrapper, one format decision, for every build.
+    export AR="$_wrappers/zigar"
+    export RANLIB="$_wrappers/zigranlib"
     export CFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
     export CXXFLAGS="-O2 -I$_deps/include -fbracket-depth=512 -Wno-error"
     # Mach-O's ld has no -Bstatic/-Bdynamic. On a macOS target the deps prefix ships

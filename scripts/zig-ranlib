@@ -1,7 +1,0 @@
-#!/bin/bash
-# `zig ranlib` as a single executable, for CMAKE_RANLIB (which takes one path). zig ranlib
-# indexes an existing archive in place and works on the Mach-O/BSD archives produced by
-# zig-ar-darwin (the archive format is fixed at `ar` time, not by ranlib). Paired with
-# zig-ar-darwin on the clang PKGBUILD's darwin main build; setup_zig_env already uses
-# `zig ranlib` as RANLIB for autoconf/meson builds.
-exec zig ranlib "$@"
