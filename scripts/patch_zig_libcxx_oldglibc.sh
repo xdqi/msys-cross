@@ -48,12 +48,18 @@ restore_backups() {
 }
 
 # ---- apply ----
+# _applied_any tracks whether any patch was NEWLY applied this run. If every patch was already
+# applied (idempotent re-run, e.g. the prep image rebuilt on the same zig), the tree was
+# already verified on the run that applied it, so the slow self-verify (which recompiles libc++
+# twice) is skipped.
+_applied_any=0
 apply_one() {
     local pf="$PATCH_DIR/$1" out rc
     [ -f "$pf" ] || die "missing patch file: $pf"
     out="$(patch -N -b --suffix=.anyfsbak -p1 --fuzz=3 -d "$LIBCXX" < "$pf" 2>&1)" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "patch_zig_libcxx_oldglibc: applied $1"
+        _applied_any=1
     elif printf '%s\n' "$out" | grep -qiE 'previously applied|Reversed'; then
         echo "patch_zig_libcxx_oldglibc: $1 already applied (skipping)"
     else
@@ -63,6 +69,13 @@ apply_one() {
     fi
 }
 for p in "${PATCHES[@]}"; do apply_one "$p"; done
+
+# Nothing newly applied → already-patched-and-verified zig; skip the expensive self-verify.
+if [ "$_applied_any" -eq 0 ]; then
+    echo "patch_zig_libcxx_oldglibc: all patches already applied — skipping self-verify"
+    find "$LIBCXX" \( -name '*.anyfsbak' -o -name '*.rej' \) -delete 2>/dev/null || true
+    exit 0
+fi
 
 # ---- self-verify (backstop against a fuzzed mis-apply) ----
 PROBE_DIR="$(mktemp -d "${TMPDIR:-$(dirname "$ZIG_PREFIX")}/zigpatch.XXXXXX")"

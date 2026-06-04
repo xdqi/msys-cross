@@ -47,16 +47,28 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Compute image tag
+      # Tag the prep image by a hash of ONLY the inputs that affect prep (Dockerfile +
+      # prepare/deps scripts + the MSYS2-packages submodule commit that pins gcc/binutils
+      # versions). Two commits with identical prep inputs → identical tag → the image is
+      # reused as-is (the build step below detects it already exists on ghcr and skips the
+      # rebuild/push). Only a real prep change produces a new tag.
+      - name: Compute image tag (content hash of prep inputs)
         id: meta
         run: |
-          # Tag by the short SHA so each commit's cells pull exactly the image built from it.
-          tag="sha-${GITHUB_SHA::12}"
+          sub="$(git -C deps/MSYS2-packages rev-parse HEAD 2>/dev/null || echo nosub)"
+          h="$( { sha256sum Dockerfile.prep \
+                            scripts/prepare-zig.sh \
+                            scripts/prepare-build-sysroot.sh \
+                            scripts/build_deps.sh \
+                            scripts/build-deps-darwin.sh \
+                            scripts/patch_zig_libcxx_oldglibc.sh \
+                            scripts/zig-common.sh \
+                            scripts/msys-cross-common.sh 2>/dev/null
+                  echo "$sub"; } | sha256sum | cut -c1-16 )"
+          tag="prep-${h}"
           echo "image=${PREP_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          echo "Prep image tag: ${tag}"
 
       - name: Log in to ghcr
         uses: docker/login-action@v3
@@ -65,11 +77,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build + push the prep image. The prep step inside the Dockerfile builds the linux
-      # deps from source (the heavy bit) and fetches darwin bottles; buildx gha cache keeps
-      # an unchanged rebuild fast. The compile-cache (sccache) is NOT used here — prep does
-      # not compile gcc/binutils, only the small static deps; those go through zig directly.
+      # Reuse: if an image with this content-hash tag already exists on ghcr, skip the build.
+      - name: Check if prep image already exists
+        id: exists
+        run: |
+          if docker manifest inspect "${{ steps.meta.outputs.image }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Prep image already exists — skipping rebuild."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Prep image not found — will build."
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      # Build + push the prep image (only when not already present). The Dockerfile builds the
+      # linux deps from source (the heavy bit) and fetches darwin bottles; buildx gha cache
+      # keeps even a rebuild fast. sccache is NOT used here — prep compiles only the small
+      # static deps via zig directly.
       - name: Build and push prep image
+        if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
