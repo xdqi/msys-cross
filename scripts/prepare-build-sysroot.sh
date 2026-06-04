@@ -181,19 +181,12 @@ WRAP
     for _tr in "${!_TOOLS_SUB[@]}"; do
         _sub="${_TOOLS_SUB[$_tr]}"
         _exedir="$OUT/$_sub/bin"
-        # Per-target native binutils naming differs by repo:
-        #   mingw64/mingw32  -> triple-prefixed in <sub>/bin (x86_64-w64-mingw32-as.exe etc.)
-        #   ucrt64           -> internally the mingw32 triple (x86_64-w64-mingw32-*), in ucrt64/bin
-        #   cygwin (msys repo) -> BARE names in usr/bin (as.exe/ld.exe/objdump.exe); the
-        #                         triple-prefixed copies live under usr/x86_64-pc-cygwin/bin.
-        # _bprefix is the filename prefix ("" = bare). _exedir is where they live.
-        case "$_tr" in
-            x86_64-w64-mingw32ucrt) _bprefix="x86_64-w64-mingw32-" ;;
-            x86_64-pc-cygwin)       _bprefix="" ;;
-            *)                      _bprefix="${_tr}-" ;;
-        esac
+        # MSYS2's binutils packages (mingw-w64-*-binutils AND the msys-repo binutils) install
+        # BARE tool names in <sub>/bin — as.exe / ld.exe / objdump.exe — NOT triple-prefixed.
+        # (The triple-prefixed copies live under <sub>/<triple>/bin.) Each <sub>/bin/as.exe is
+        # already configured for that target, so the bare name is the right one to wrap.
         for _tool in as ld objdump; do
-            _exe="${_bprefix}${_tool}.exe"
+            _exe="${_tool}.exe"
             if [ ! -x "$_exedir/$_exe" ]; then
                 echo "  WARNING: native $_tool.exe not found for $_tr ($_exedir/$_exe) — skip"
                 continue
