@@ -11,6 +11,12 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Redirect the TLS trust store to the in-prefix CA bundle. libcurl bakes its CA
+# path at build time (curl --with-ca-bundle=/etc/ssl/...) and, unlike the curl(1)
+# tool, does NOT read CURL_CA_BUNDLE on its own — that compiled path is absent in a
+# relocatable /opt/msys2-cross prefix and never exists on macOS. Source patch 0004
+# (pacman: lib/libalpm/dload.c) makes libalpm read CURL_CA_BUNDLE and feed it to
+# CURLOPT_CAINFO, so this export is what makes TLS downloads work on both platforms.
 export CURL_CA_BUNDLE="$PREFIX/etc/ssl/certs/ca-certificates.crt"
 
 # --root rebases the DBPath/LogFile *defaults* into the prefix, but NOT CacheDir

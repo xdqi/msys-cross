@@ -95,8 +95,12 @@ case '$DISTRO' in
         ;;
 esac
 
-mkdir -p /etc/ssl/certs
-[ -f /etc/ssl/certs/ca-certificates.crt ] || ln -sf \"\$PREFIX/etc/ssl/certs/ca-certificates.crt\" /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+# NOTE: we deliberately do NOT symlink the bundle into /etc/ssl/certs anymore.
+# libcurl's compiled CA path is irrelevant now: msys-pacman exports CURL_CA_BUNDLE
+# and pacman source patch 0004 feeds it to CURLOPT_CAINFO, so the in-prefix bundle
+# is used directly. Leaving the symlink would mask a regression in that path (the
+# test would pass via /etc/ssl even if the env→CAINFO wiring broke). On minimal
+# distros without a system ca-certificates this is also what real users rely on.
 
 echo
 echo '=== Verify bootstrap ==='
