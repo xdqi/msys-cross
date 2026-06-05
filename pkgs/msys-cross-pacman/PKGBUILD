@@ -51,10 +51,11 @@ options=('!emptydirs' '!lto' '!strip' '!debug')
 source+=("file://$_startdir/0001-nonroot-allow-install.patch"
          "file://$_startdir/0002-no-extract-owner.patch"
          "file://$_startdir/0003-syshookdir-msys-cross.patch"
+         "file://$_startdir/0004-cainfo-from-curl-ca-bundle-env.patch"
          "file://$_startdir/msys-pacman"
          "file://$_startdir/pacman.conf"
          "file://$_startdir/pacman-darwin.conf")
-sha512sums+=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha512sums+=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 # ---- Toolchain: zig cc target gnu.2.11, mostly-static ----
 # Re-export AFTER inherit_aur so we override the AUR's top-level CC=musl-gcc /
@@ -96,7 +97,8 @@ _require_builddeps_libs() {
 prepare() {
     _aur_prepare
     cd "${srcdir}/pacman"
-    for p in 0001-nonroot-allow-install 0002-no-extract-owner 0003-syshookdir-msys-cross; do
+    for p in 0001-nonroot-allow-install 0002-no-extract-owner 0003-syshookdir-msys-cross \
+             0004-cainfo-from-curl-ca-bundle-env; do
         msg2 "Applying ${p}.patch"
         patch -Np1 -i "${srcdir}/${p}.patch"
     done
@@ -312,6 +314,35 @@ EOF
         echo "check(): FAILED — original system hook dir still present" >&2; return 1
     fi
     echo "check(): OK — system hook dir redirected to msys-cross-hooks"
+
+    # CAINFO from CURL_CA_BUNDLE: libcurl bakes the CA bundle path at build time and
+    # (unlike curl(1)) ignores CURL_CA_BUNDLE, so without 0004 the trust store can't be
+    # redirected to the relocatable in-prefix bundle — fatal on macOS, which has no
+    # /etc/ssl/...crt. Assert the patch is COMPILED INTO the binary (not merely applied
+    # to the source): the "CURL_CA_BUNDLE" getenv() literal lands in rodata and is absent
+    # from stock pacman/libcurl (libcurl uses the name only in the curl(1) tool, and
+    # libalpm never referenced it). Works for BOTH the native x86_64 and the arm64 cross
+    # binary, neither of which we can necessarily run here.
+    if ! strings "$bin" | grep -qF 'CURL_CA_BUNDLE'; then
+        echo "check(): FAILED — CURL_CA_BUNDLE not in binary (0004 not compiled in?)" >&2; return 1
+    fi
+    echo "check(): OK — binary honours CURL_CA_BUNDLE (literal present → CURLOPT_CAINFO wired)"
+
+    # Then, for the NATIVE (runnable) build only, prove it at runtime: point
+    # CURL_CA_BUNDLE at a bogus path and confirm pacman's TLS error now names THAT path
+    # (env reached libcurl) rather than the compiled-in /etc/ssl default. This is the
+    # exact failure the macOS user hit, run in reverse as a positive control.
+    if [ "${CARCH}" != "arm64" ]; then
+        local out2 bogus="${srcdir}/_no_such_ca_bundle.crt"
+        rm -f "$bogus"
+        out2=$(CURL_CA_BUNDLE="$bogus" "$bin" --root "$root" --config "$root/pacman.conf" \
+            --dbpath "$root/var/lib/pacman" --noconfirm -Sy 2>&1) || true
+        if ! grep -qF "$bogus" <<<"$out2"; then
+            echo "check(): FAILED — CURL_CA_BUNDLE not honoured by libcurl; error did not name $bogus" >&2
+            echo "$out2" >&2; return 1
+        fi
+        echo "check(): OK — CURL_CA_BUNDLE reaches libcurl (TLS error named the override path)"
+    fi
 }
 
 # ---- package(): extract ONLY the pacman-static binary + wrapper + conf ----

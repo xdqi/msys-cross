@@ -1,0 +1,42 @@
+libalpm/dload: honour CURL_CA_BUNDLE for the CA bundle path
+
+libcurl's CA bundle path is fixed at build time via curl's
+--with-ca-bundle (here /etc/ssl/certs/ca-certificates.crt). That path is
+absent in a relocatable /opt/msys2-cross prefix, and never present on
+macOS (Apple uses the Keychain, not /etc/ssl), so the very first TLS
+download fails with "error adding trust anchors from file:
+/etc/ssl/certs/ca-certificates.crt".
+
+Unlike the curl(1) command-line tool, libcurl does NOT read the
+CURL_CA_BUNDLE / SSL_CERT_FILE environment variables on its own, and its
+compiled-in CURLOPT_CAINFO default overrides OpenSSL's own
+X509_STORE_set_default_paths env-var logic. libalpm sets no CAINFO, so
+there is no way for the msys-pacman wrapper to redirect the trust store.
+
+Read CURL_CA_BUNDLE here and feed it to CURLOPT_CAINFO when set, so the
+msys-pacman wrapper (which exports CURL_CA_BUNDLE=$PREFIX/etc/ssl/certs/
+ca-certificates.crt) can point libcurl at the in-prefix bundle on every
+platform. No behaviour change when the variable is unset.
+
+--- a/lib/libalpm/dload.c
++++ b/lib/libalpm/dload.c
+@@ -416,6 +416,19 @@ static void curl_set_handle_opts(CURL *curl, struct dload_payload *payload)
+ 		curl_easy_setopt(curl, CURLOPT_USERAGENT, useragent);
+ 	}
+
++	/* msys2-cross: libcurl's CA bundle path is baked in at build time
++	 * (--with-ca-bundle), which points at a fixed /etc/ssl path that does not
++	 * exist in a relocatable prefix (and never on macOS). libcurl, unlike the
++	 * curl(1) tool, ignores the CURL_CA_BUNDLE / SSL_CERT_FILE environment
++	 * variables, so honour CURL_CA_BUNDLE here by feeding it to CURLOPT_CAINFO.
++	 * This lets the msys-pacman wrapper point at the in-prefix bundle. */
++	{
++		const char *ca_bundle = getenv("CURL_CA_BUNDLE");
++		if(ca_bundle != NULL && ca_bundle[0] != '\0') {
++			curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle);
++		}
++	}
++
+ 	if(!payload->force && payload->mtime_existing_file) {
+ 		/* start from scratch, but only download if our local is out of date. */
+ 		curl_easy_setopt(curl, CURLOPT_TIMECONDITION, CURL_TIMECOND_IFMODSINCE);
