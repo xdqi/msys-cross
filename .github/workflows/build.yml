@@ -183,6 +183,36 @@ jobs:
           fi
           echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
 
+      # The build compiles run as `builduser` (makepkg/build_deps refuse root), but the
+      # coordinator action set SCCACHE_DIR=$HOME/.cache/sccache and wrote the dist config to
+      # $HOME/.config/sccache/config in ROOT's home. As builduser, sccache (a) can't write
+      # root's cache dir -> "failed to create directory …/preprocessor: Permission denied" ->
+      # every compile produces no object -> configure reports "no working compiler"; and
+      # (b) can't see the dist config so it wouldn't distribute. Fix both: relocate the sccache
+      # cache to a builduser-owned dir (override SCCACHE_DIR for all later steps) and mirror the
+      # dist config + the forked sccache binary into builduser's HOME / a shared PATH.
+      - name: Make sccache usable by builduser (cache dir + dist config)
+        run: |
+          set -euo pipefail
+          BU_HOME="$(getent passwd builduser | cut -d: -f6)"; BU_HOME="${BU_HOME:-/home/builduser}"
+          # 1) builduser-owned cache dir, shared by every later step (root + builduser).
+          SCC_DIR=/opt/msys-cross/.sccache-cache
+          mkdir -p "$SCC_DIR"
+          chown -R builduser:builduser "$SCC_DIR"
+          echo "SCCACHE_DIR=${SCC_DIR}" >> "$GITHUB_ENV"
+          # 2) Give builduser the dist config the coordinator wrote into root's home.
+          if [ -f "$HOME/.config/sccache/config" ]; then
+            install -d -o builduser -g builduser "$BU_HOME/.config/sccache"
+            install -o builduser -g builduser "$HOME/.config/sccache/config" "$BU_HOME/.config/sccache/config"
+            echo "dist config mirrored to ${BU_HOME}/.config/sccache/config"
+          else
+            echo "::warning::no dist config at \$HOME/.config/sccache/config — deps would compile locally"
+          fi
+          # 3) The forked sccache binary is on root's PATH via the action ($RUNNER_TEMP/sccache-engine);
+          #    runuser resets PATH, but run_as_builduser re-asserts the caller's PATH, so builduser
+          #    inherits it. Record where it is for the diagnostics/sanity.
+          echo "sccache for builduser: $(command -v sccache)  ->  $(runuser -u builduser -- sh -c 'command -v sccache || echo MISSING')"
+
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
       # deps are just Homebrew-bottle curls (no compile) but use the same phase.
