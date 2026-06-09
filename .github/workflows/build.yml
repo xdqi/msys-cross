@@ -1,15 +1,21 @@
-# Build the full msys2-cross toolchain repo on GitHub Actions — PARALLEL topology.
+# Build the full msys2-cross toolchain repo on GitHub Actions — sccache-dist FARM topology.
 #
-# Steps 0-3 (host tools, zig, MSYS2 sysroots + wine helpers, BOTH hosts' static deps) are
-# baked ONCE into a prep container image (build-prep-image job → ghcr). Then 10 cells run in
-# parallel, each `container:` that image: per host (linux x86_64, darwin arm64-macOS) a
-# [binutils→gcc] chain for each of mingw64/mingw32/ucrt64/cygwin plus a clang cell. gcc-<t>
-# needs only binutils-<t>, so each chain is self-contained in one cell — no cross-cell deps,
-# no artifact-of-binutils. Each cell uploads its *.pkg.tar.* as an artifact. Two collect jobs
-# (one per host) download all of that host's cell artifacts into PKGDEST, run Step 5-6
-# (repo-add + installer), and publish the GitHub Release — a single fan-in point per tag, so
-# no multi-writer race. Compiler cache is the shared external SeaweedFS S3 bucket (sccache),
-# so all cells/runs share one hot cache.
+# History: this replaced a 12-cell parallel topology (one cell per binutils→gcc chain +
+# a clang cell, per host). The farm collapses that fan-out into ONE coordinator container
+# and distributes the actual compiles across a Tailscale-connected worker pool.
+#
+# Steps 0-2 (host tools, zig, MSYS2 sysroots + wine helpers) are baked ONCE into a prep
+# container image (build-prep-image job → ghcr); Step 3 (static deps) and the binutils→gcc
+# phases run in the single `build` (coordinator) container, with their TUs fanned out to
+# the farm via MAKEFLAGS=-j$SCCACHE_J. The `workers` matrix job brings up 15 ephemeral
+# sccache-dist servers that bind to this run's coordinator and self-tear-down when it exits.
+#
+# The compiler is `zig cc`/`zig c++` driven through scripts/zigcc/zigc++, which hand the
+# compile to `sccache zig <mode>` so the FORKED sccache's is_zig gate fires and its
+# ZigToolchainPackager ships the zig binary + lib/ (incl. libc++ headers) to each worker —
+# the prerequisite for distributing C++ TUs (see scripts/zig-common.sh). Compiler cache is
+# the shared external SeaweedFS S3 bucket, selected via builduser's sccache [cache.s3]
+# config file, so every worker/run shares one hot cache independent of distribution.
 name: build
 
 on:
@@ -86,51 +92,62 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------
-  # Build cells: 2 hosts × {4 chains + clang} = 10 cells, all from the prep image.
+  # Workers: 15 ephemeral sccache-dist servers forming ONE farm for this run.
+  # Plain ubuntu-latest (Docker preinstalled) — the zig toolchain travels in the
+  # dist toolchain-archive, so no prep image is needed here. Each worker binds to
+  # this run's single coordinator (run-prefix = github.run_id) and self-tears-down
+  # when the coordinator (the build job) exits.
   # ---------------------------------------------------------------------------
-  cell:
+  workers:
     needs: build-prep-image
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    container:
-      image: ${{ needs.build-prep-image.outputs.image }}
     strategy:
       fail-fast: false
       matrix:
-        host: [linux, darwin]
-        phase: [others, chain:mingw64, chain:mingw32, chain:ucrt64, chain:cygwin, clang]
-        # 2 hosts × 6 phases = 12 cells. `others` builds the foundation packages
-        # (filesystem/ca-certificates/pacman/pkgconfig) in its own cell so the chain/clang
-        # cells don't each rebuild them; chain/clang/others are fully independent (the
-        # compilers don't need the foundation in INSTALL_PREFIX to build). darwin cells are
-        # skipped on PRs via the step-level gate below (matrix exclude can't read
-        # github.event_name).
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
-      - name: Skip darwin on PRs
-        id: gate
-        run: |
-          if [ "${{ matrix.host }}" = darwin ] && [ "${{ github.event_name }}" = pull_request ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "darwin cells are not built on PRs — skipping."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # The prep image is rebuilt every run from this commit (SHA-tagged, COPY . .), so
-      # /opt/msys-cross already holds the current source AND the prep outputs (build/, deps/).
-      # Build straight from it — no in-container re-sync needed.
-      - name: Enter prep workspace
-        if: steps.gate.outputs.skip != 'true'
-        run: echo "WS=/opt/msys-cross" >> "$GITHUB_ENV"
-
-      - name: Set up sccache
-        if: steps.gate.outputs.skip != 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Run sccache-dist worker ${{ matrix.idx }}
+        uses: xdqi/sccache-dist-action@v0.0.4
         with:
-          version: "v0.10.0"
+          mode: worker
+          worker-index: ${{ matrix.idx }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
 
-      - name: Configure sccache (S3 backend)
-        if: steps.gate.outputs.skip != 'true'
+  # ---------------------------------------------------------------------------
+  # Build (single client/coordinator container): drives the 15-worker farm.
+  # Replaces the 12-cell fan-out + the two collect jobs. Builds all linux phases
+  # serially (TUs fan out to the farm via MAKEFLAGS=-j$SCCACHE_J), assembles +
+  # releases linux; then on push builds darwin back-to-back (same farm, same S3
+  # cache) and releases it. A SECOND coordinator can't share one worker pool
+  # (workers hard-bind to one coordinator), so darwin is sequential here, not a
+  # separate client.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: [build-prep-image, workers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: ${{ needs.build-prep-image.outputs.image }}
+    steps:
+      - name: Start sccache-dist coordinator (15-worker farm)
+        id: farm
+        uses: xdqi/sccache-dist-action@v0.0.4
+        with:
+          mode: coordinator
+          expected-workers: 15
+          min-workers: 8
+          wait-timeout: 600s
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      # AFTER the coordinator step so the S3 client cache wins over the coordinator's
+      # local SCCACHE_DIR. Same SeaweedFS bucket the 12 cells used (verified reachable).
+      # MAKEFLAGS=-j$SCCACHE_J is THE knob that fans each package's TUs to the farm:
+      # makepkg reads -j from MAKEFLAGS, which is otherwise unset (packages would
+      # compile serially). runuser preserves exported env, so it reaches makepkg.
+      - name: Configure sccache S3 cache + farm -j
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
@@ -138,7 +155,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET }}
         run: |
           {
-            echo "SCCACHE_PATH=${SCCACHE_PATH}"
             echo "SCCACHE_REGION=auto"
             echo "SCCACHE_S3_USE_SSL=true"
             echo "SCCACHE_S3_KEY_PREFIX=msys2-cross"
@@ -147,82 +163,39 @@ jobs:
             echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}"
             echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            echo "MAKEFLAGS=-j${SCCACHE_J:-2}"
           } >> "$GITHUB_ENV"
           if [ -z "${SCCACHE_BUCKET}" ]; then
-            echo "::warning::SCCACHE_S3_* secrets absent — sccache will run with no backend (every compile a miss)."
+            echo "::warning::SCCACHE_S3_* secrets absent — sccache S3 cache disabled (farm still distributes)."
           fi
+          echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
 
-      # clang is built once per host (BUILD_CLANG=true both); the chain phases build their
-      # one target's binutils→gcc. The prep image's repo tree already has Steps 0-3 done.
-      - name: Build cell (${{ matrix.host }} ${{ matrix.phase }})
-        if: steps.gate.outputs.skip != 'true'
+      - name: Build linux phases via the farm
         working-directory: /opt/msys-cross
-        run: bash scripts/build.sh ${{ matrix.host }} ${{ matrix.phase }}
+        run: |
+          set -euo pipefail
+          for ph in others chain:mingw64 chain:mingw32 chain:ucrt64 chain:cygwin clang; do
+            echo "::group::build linux $ph"
+            bash scripts/build.sh linux "$ph"
+            echo "::endgroup::"
+          done
 
-      - name: sccache stats
-        if: ${{ always() && steps.gate.outputs.skip != 'true' }}
+      - name: sccache stats (linux)
+        if: always()
         run: "${SCCACHE_PATH:-sccache} --show-stats || true"
 
-      # Each cell uploads its produced packages. PKGDEST is repo/ (linux) or repo-darwin/
-      # (darwin); the artifact name is unique per (host, phase) so the collect job can grab
-      # them all. A sanitized phase (": " → "-") keeps the artifact name valid.
-      - name: Compute artifact name
-        if: steps.gate.outputs.skip != 'true'
-        id: art
-        run: |
-          ph="$(echo '${{ matrix.phase }}' | tr ':' '-')"
-          echo "name=pkgs-${{ matrix.host }}-${ph}" >> "$GITHUB_OUTPUT"
-          if [ "${{ matrix.host }}" = darwin ]; then
-            echo "dir=repo-darwin" >> "$GITHUB_OUTPUT"
-          else
-            echo "dir=repo" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload cell packages
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.art.outputs.name }}
-          path: /opt/msys-cross/${{ steps.art.outputs.dir }}/*.pkg.tar.*
-          if-no-files-found: error
-          retention-days: 14
-
-  # ---------------------------------------------------------------------------
-  # Collect (linux): gather all linux cells' packages → repo-add + installer → release.
-  # ---------------------------------------------------------------------------
-  collect-linux:
-    needs: [build-prep-image, cell]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.build-prep-image.outputs.image }}
-    steps:
-      - name: Download all linux cell packages
-        uses: actions/download-artifact@v5
-        with:
-          pattern: pkgs-linux-*
-          path: /tmp/pkgs
-          merge-multiple: true
-
-      - name: Stage packages into repo/
-        working-directory: /opt/msys-cross
-        run: |
-          mkdir -p repo
-          cp -v /tmp/pkgs/*.pkg.tar.* repo/ 2>/dev/null || true
-          ls -lh repo/*.pkg.tar.* | head -50
-
-      - name: Assemble repo db + installer
+      - name: Assemble linux repo db + installer
         working-directory: /opt/msys-cross
         run: bash scripts/build.sh linux assemble
 
-      - name: Summarize repo
+      - name: Summarize linux repo
         working-directory: /opt/msys-cross
         run: |
           echo "=== Packages ==="; ls -lh repo/*.pkg.tar.* 2>/dev/null || true
           echo "=== Database ==="; ls -lh repo/msys-cross.db* repo/msys-cross.files* 2>/dev/null || true
           echo "=== Bootstrap ==="; ls -lh repo/bootstrap.tar.xz 2>/dev/null || true
 
-      - name: Upload pacman repo
+      - name: Upload linux pacman repo
         uses: actions/upload-artifact@v7
         with:
           name: msys-cross-repo
@@ -233,7 +206,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload bootstrap tarball
+      - name: Upload linux bootstrap tarball
         uses: actions/upload-artifact@v7
         with:
           name: msys-cross-bootstrap
@@ -241,7 +214,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish release
+      - name: Publish linux release
         if: github.event_name == 'push'
         working-directory: /opt/msys-cross
         env:
@@ -265,42 +238,29 @@ jobs:
             --notes "Automated build from ${GITHUB_SHA}. Consumed by msys-mirror; pin via /archive/${tag}/." \
             --target "${GITHUB_SHA}"
 
-  # ---------------------------------------------------------------------------
-  # Collect (darwin): same, for the arm64-macOS-host repo. Skipped on PRs.
-  # ---------------------------------------------------------------------------
-  collect-darwin:
-    needs: [build-prep-image, cell]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.build-prep-image.outputs.image }}
-    steps:
-      - name: Download all darwin cell packages
-        uses: actions/download-artifact@v5
-        with:
-          pattern: pkgs-darwin-*
-          path: /tmp/pkgs
-          merge-multiple: true
-
-      - name: Stage packages into repo-darwin/
+      # ---- darwin: push-only, back-to-back in the SAME coordinator container ----
+      - name: Build darwin phases via the farm
+        if: github.event_name == 'push'
         working-directory: /opt/msys-cross
         run: |
-          mkdir -p repo-darwin
-          cp -v /tmp/pkgs/*.pkg.tar.* repo-darwin/ 2>/dev/null || true
-          ls -lh repo-darwin/*.pkg.tar.* | head -50
+          set -euo pipefail
+          for ph in others chain:mingw64 chain:mingw32 chain:ucrt64 chain:cygwin clang; do
+            echo "::group::build darwin $ph"
+            bash scripts/build.sh darwin "$ph"
+            echo "::endgroup::"
+          done
 
-      - name: Assemble repo db + installer
+      - name: sccache stats (darwin)
+        if: ${{ always() && github.event_name == 'push' }}
+        run: "${SCCACHE_PATH:-sccache} --show-stats || true"
+
+      - name: Assemble darwin repo db + installer
+        if: github.event_name == 'push'
         working-directory: /opt/msys-cross
         run: bash scripts/build.sh darwin assemble
 
-      - name: Summarize darwin repo
-        working-directory: /opt/msys-cross
-        run: |
-          echo "=== Darwin packages ==="; ls -lh repo-darwin/*.pkg.tar.* 2>/dev/null || true
-          echo "=== Darwin database ==="; ls -lh repo-darwin/msys-cross-darwin.db* 2>/dev/null || true
-
       - name: Upload darwin pacman repo
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v7
         with:
           name: msys-cross-darwin-repo
