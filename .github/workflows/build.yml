@@ -177,6 +177,26 @@ jobs:
           fi
           echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
 
+      # TEMP DIAGNOSTIC: reproduce gmp's failing object-compile probe directly through the
+      # zigcc wrapper with sccache dist logging, so the real error is in THIS step's log
+      # (configure swallows it into config.log otherwise). Remove once the deps step is green.
+      - name: DIAG zigcc compile probe (dist)
+        working-directory: /opt/msys-cross
+        env:
+          SCCACHE_LOG: debug
+        run: |
+          set +e
+          . scripts/env-linux.sh
+          . scripts/msys-cross-common.sh && setup_zig_env
+          printf 'int main(void){return 0;}\n' > /tmp/conftest.c
+          echo "=== which sccache / zig ==="; command -v sccache; command -v zig; sccache --version
+          echo "=== sccache config ==="; cat "${HOME}/.config/sccache/config" 2>/dev/null | sed 's/token =.*/token = ***/'
+          echo "=== runuser-as-builduser zigcc -c (the gmp probe) ==="
+          chown builduser /tmp/conftest.c 2>/dev/null || true
+          run_as_builduser env SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.o 2>&1 | tail -60
+          echo "rc=$?  conftest.o: $([ -f /tmp/conftest.o ] && echo YES || echo NO)"
+          echo "=== sccache stats after probe ==="; sccache --show-stats 2>&1 | grep -iE "error|dist|compil|fallback|cache" || true
+
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
       # deps are just Homebrew-bottle curls (no compile) but use the same phase.
