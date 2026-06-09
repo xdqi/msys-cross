@@ -15,7 +15,8 @@
 # The zig compilation target. Defaults to the canonical Linux glibc target; override
 # via the ZIG_TARGET env var to retarget the whole toolchain (e.g. aarch64-macos.11.0
 # for a macOS-hosted cross build). Both wrappers pass this verbatim to `zig cc/c++
-# -target`, and zig_sccache_reexec folds it into the sccache cache-buster (below).
+# -target`; since the compile is handed to `sccache zig cc … -target <T>`, sccache sees
+# the target as a visible argument and partitions the cache by it natively.
 #
 # Special value ZIG_TARGET=native: build for the BUILD machine (the Linux runner), mapped to
 # that host's canonical gnu target. Used by the clang PKGBUILD's stage-1 native LLVM build —
@@ -24,7 +25,7 @@
 # underneath, so
 # the inherited clang-only CFLAGS (-fbracket-depth=512) are accepted; only the target changes.
 # Mapping to a fixed triple (not zig's bare `native`) keeps -dumpmachine and the sccache
-# cache-buster deterministic. These NATIVE tools aren't shipped, so the 2.11 glibc floor is
+# cache key deterministic. These NATIVE tools aren't shipped, so the 2.11 glibc floor is
 # irrelevant — it just reuses the linux target.
 ZIG_CC_TARGET="${ZIG_TARGET:-x86_64-linux-gnu.2.11}"
 if [ "$ZIG_CC_TARGET" = native ]; then
@@ -34,32 +35,6 @@ if [ "$ZIG_CC_TARGET" = native ]; then
         *)              ZIG_CC_TARGET="$(uname -m)-linux-gnu" ;;
     esac
 fi
-
-# zig_sccache_reexec "$@"
-# sccache two-role trick: sccache can't wrap the two-token `zig cc` directly, so the
-# wrapper re-execs as `sccache <self> "$@"` (outer role) and sccache then re-runs
-# <self> with _ZIGCC_INNER set (inner role) which falls through to the real compile.
-# Call this FIRST in the wrapper, before any arg munging, passing the original "$@".
-# Prefer $SCCACHE_PATH (mozilla-actions/sccache-action) since PATH may be reset when
-# the build drops to an unprivileged user via runuser; else sccache on PATH; else
-# no-op (caching is opt-in — local builds without sccache compile directly).
-zig_sccache_reexec() {
-    if [ -z "${_ZIGCC_INNER:-}" ]; then
-        local _sccache="${SCCACHE_PATH:-}"
-        [ -z "$_sccache" ] && _sccache="$(command -v sccache 2>/dev/null || true)"
-        if [ -n "$_sccache" ]; then
-            # sccache hashes the "compiler" via $0 = THIS wrapper script, whose bytes
-            # don't change when the real zig is upgraded, and it never sees the -target
-            # we inject internally. So two distinct compiles (different zig version, or
-            # different ZIG_TARGET) can collide on one cache key. Fold both into
-            # SCCACHE_C_CUSTOM_CACHE_BUSTER (a whitelisted CACHED_ENV_VAR, purpose-built
-            # for this) so the key is partitioned by real zig version AND target.
-            export SCCACHE_C_CUSTOM_CACHE_BUSTER="$(zig version 2>/dev/null):$ZIG_CC_TARGET"
-            _ZIGCC_INNER=1 exec "$_sccache" "$0" "$@"
-        fi
-    fi
-    unset _ZIGCC_INNER 2>/dev/null || true
-}
 
 # zig_handle_dumpmachine "$@"
 # GNU gcc's `-dumpmachine` prints the bare target triple and exits 0; build systems
@@ -136,11 +111,12 @@ zig_filter_args() {
 # this file, differing only in the mode token (cc / c++) they pass as the first arg:
 #   source .../zig-common.sh cc  "$@"      # zigcc
 #   source .../zig-common.sh c++ "$@"      # zigc++
-# (No symlink — a symlink would feed identical bytes to sccache for both roles and
-# collide their cache keys; two tiny wrappers passing different modes is the point.)
-# Sourcing keeps $0 as the wrapper itself, which is what sccache probes and what
-# zig_sccache_reexec re-execs as `sccache "$0" …`; the mode rides through that round-trip
-# as a normal positional arg, so the inner role still drives the right compiler.
+# (No symlink — two tiny wrappers passing different modes is the point; the mode
+# decides cc vs c++ and the c++ `-x c++` injection below.)
+# Sourcing keeps this process in the wrapper so it can do the work sccache can't see
+# through — -dumpmachine, GCC-only -W filtering, the -target injection — before handing
+# the real compile to `sccache zig <mode> …` (which is what trips sccache's is_zig gate
+# and distributes the TU). See the hand-off at the end of zig_main.
 # c++ mode adds an explicit `-x c++` on compile invocations so a .c source
 # (libgcc/libgcov-util.c etc.) engages libc++'s C++ frontend — see zigc++ history for the
 # <type_traits> errors otherwise.
@@ -151,13 +127,29 @@ zig_main() {
         *) echo "zig-common.sh: bad mode '$mode' (expected cc or c++)" >&2; exit 2 ;;
     esac
 
-    zig_handle_dumpmachine "$@"    # gcc-compatible -dumpmachine (exits 0)
-    zig_sccache_reexec "$@"        # outer role re-execs under sccache; inner falls through
+    zig_handle_dumpmachine "$@"    # gcc-compatible -dumpmachine (exits 0), BEFORE sccache:
+                                   # sccache/clang would reject the versioned triple or run `zig -E`.
     zig_filter_args "$@"           # sets ZIG_ARGS (filtered), ZIG_IS_COMPILE
 
     local xflag=()
     [ "$mode" = c++ ] && $ZIG_IS_COMPILE && xflag=(-x c++)
-    exec zig "$mode" "${xflag[@]}" -target "$ZIG_CC_TARGET" "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"
+
+    # Hand the real compile to `sccache zig <mode> …` so sccache sees the executable
+    # stem `zig` and a `cc`/`c++` subcommand as argv[0] — the only shape that trips
+    # sccache's is_zig gate (compiler.rs:1497) into the Zig toolchain packager and
+    # thus DISTRIBUTES the TU across the farm. The wrapper still owns everything sccache
+    # can't see through: -dumpmachine (above), GCC-only -W filtering, the -target
+    # injection (rides through rewrite_dist_arguments to the worker), and the c++ `-x c++`.
+    # No cache-buster needed: sccache now hashes the real `zig` binary + the visible
+    # -target, so the (zig version, target) cache dimensions are captured natively.
+    local _sccache="${SCCACHE_PATH:-}"
+    [ -z "$_sccache" ] && _sccache="$(command -v sccache 2>/dev/null || true)"
+    if [ -n "$_sccache" ]; then
+        exec "$_sccache" zig "$mode" "${xflag[@]}" -target "$ZIG_CC_TARGET" "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"
+    else
+        # No sccache (local dev): compile directly — caching/distribution are opt-in.
+        exec zig "$mode" "${xflag[@]}" -target "$ZIG_CC_TARGET" "${ZIG_ARGS[@]}" "${ZIG_WNO[@]}"
+    fi
 }
 
 zig_main "$@"
