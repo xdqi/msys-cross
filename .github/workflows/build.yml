@@ -177,15 +177,22 @@ jobs:
           fi
           echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
 
-      # The build compiles run as `builduser` (makepkg/build_deps refuse root), but the
-      # coordinator action set SCCACHE_DIR=$HOME/.cache/sccache and wrote the dist config to
-      # $HOME/.config/sccache/config in ROOT's home. As builduser, sccache (a) can't write
-      # root's cache dir -> "failed to create directory …/preprocessor: Permission denied" ->
-      # every compile produces no object -> configure reports "no working compiler"; and
-      # (b) can't see the dist config so it wouldn't distribute. Fix both: relocate the sccache
-      # cache to a builduser-owned dir (override SCCACHE_DIR for all later steps) and mirror the
-      # dist config + the forked sccache binary into builduser's HOME / a shared PATH.
-      - name: Make sccache usable by builduser (cache dir + dist config + S3 server)
+      # The build compiles run as `builduser` (makepkg/build_deps refuse root). The coordinator
+      # set SCCACHE_DIR + wrote the dist config in ROOT's home, which builduser can't write/read.
+      # Two failures resulted: (a) builduser couldn't write root's cache dir
+      # ("failed to create directory …/preprocessor: Permission denied" -> no object -> configure
+      # "no working compiler"); (b) the cache backend stayed Local-disk (S3 env didn't reliably
+      # reach the auto-started daemon through runuser), so nothing reached S3.
+      #
+      # Fix, robustly: (1) a builduser-owned cache dir (override SCCACHE_DIR for all steps);
+      # (2) select the S3 backend via the sccache CONFIG FILE ([cache.s3], read deterministically
+      # by the daemon — env-var backend selection through runuser proved flaky); AWS creds still
+      # come from env (sccache only reads creds from env), exported here so the auto-started
+      # daemon has them; (3) keep the coordinator's [dist] section in the same file so compiles
+      # still DISTRIBUTE. No manual --start-server: the first compile starts the daemon, which
+      # now reads S3 from the file + creds from env. S3 caching makes dist failures recoverable
+      # (the result is re-fetchable) and gives cross-run reuse.
+      - name: Make sccache usable by builduser (writable cache + S3 backend via config file)
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
@@ -194,58 +201,66 @@ jobs:
         run: |
           set -euo pipefail
           BU_HOME="$(getent passwd builduser | cut -d: -f6)"; BU_HOME="${BU_HOME:-/home/builduser}"
-          # 1) builduser-owned cache dir (the local fallback dir; S3 is the real backend below).
+          # 1) builduser-owned cache dir (local fallback / preprocessor scratch).
           SCC_DIR=/opt/msys-cross/.sccache-cache
           mkdir -p "$SCC_DIR"; chown -R builduser:builduser "$SCC_DIR"
           echo "SCCACHE_DIR=${SCC_DIR}" >> "$GITHUB_ENV"
-          # 2) Give builduser the dist config the coordinator wrote into root's home (so it
-          #    DISTRIBUTES). S3 caching is orthogonal and comes from the env below.
-          if [ -f "$HOME/.config/sccache/config" ]; then
-            install -d -o builduser -g builduser "$BU_HOME/.config/sccache"
-            install -o builduser -g builduser "$HOME/.config/sccache/config" "$BU_HOME/.config/sccache/config"
-            echo "dist config mirrored to ${BU_HOME}/.config/sccache/config"
+          # 2+3) Build builduser's sccache config: S3 backend ([cache.s3], from file = robust) plus
+          #      the coordinator's [dist] section (so compiles still distribute). The daemon reads
+          #      this file deterministically at start; AWS creds ride the env (only source sccache
+          #      reads them from). If S3 secrets are absent, omit [cache.s3] -> local-disk cache.
+          install -d -o builduser -g builduser "$BU_HOME/.config/sccache"
+          cfg="$BU_HOME/.config/sccache/config"; : > "$cfg"
+          if [ -n "${SCCACHE_BUCKET}" ]; then
+            {
+              echo "[cache.s3]"
+              echo "bucket = \"${SCCACHE_BUCKET}\""
+              echo "endpoint = \"${SCCACHE_ENDPOINT}\""
+              echo "region = \"auto\""
+              echo "key_prefix = \"msys2-cross\""
+              echo "use_ssl = true"
+              echo "no_credentials = false"
+            } >> "$cfg"
+            # Creds for the daemon (env-only in sccache); export for all later builduser steps.
+            {
+              echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            } >> "$GITHUB_ENV"
           else
-            echo "::warning::no dist config — deps/phases would compile locally (no farm)"
+            echo "::warning::SCCACHE_S3_* secrets absent — sccache will use local-disk cache only."
           fi
-          # 3) THE KEY STEP: the sccache *server* captures its cache backend (S3 vs disk) at
-          #    START time from the process env. Compiles run as builduser, so builduser's server
-          #    must be (re)started WITH the S3 env present — otherwise it serves disk-only and
-          #    nothing reaches S3 (observed: bucket stayed empty). Stop any stale server, then
-          #    start builduser's server with the full S3 env so it picks the S3 backend.
+          # Append the coordinator's [dist] section verbatim (distribution stays on).
+          if [ -f "$HOME/.config/sccache/config" ]; then
+            cat "$HOME/.config/sccache/config" >> "$cfg"
+            echo "appended [dist] section from coordinator config"
+          else
+            echo "::warning::no coordinator [dist] config — compiles will run locally (no farm)"
+          fi
+          chown builduser:builduser "$cfg"
+          echo "=== builduser sccache config ($cfg) ==="
+          sed 's/token = .*/token = ***/; s/AWS.*=.*/&/' "$cfg"
+          # Sanity: start the daemon as builduser and confirm the backend is s3 (best-effort;
+          # the S3 stats round-trip can be slow, so cap it and don't fail the step on timeout).
           SCC="$(command -v sccache)"
-          run_as() { runuser -w PATH -u builduser -- env PATH="$PATH" \
-              SCCACHE_DIR="$SCC_DIR" \
-              SCCACHE_BUCKET="$SCCACHE_BUCKET" SCCACHE_ENDPOINT="$SCCACHE_ENDPOINT" \
-              SCCACHE_REGION=auto SCCACHE_S3_USE_SSL=true SCCACHE_S3_KEY_PREFIX=msys2-cross \
-              AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-              "$@"; }
-          run_as "$SCC" --stop-server >/dev/null 2>&1 || true
-          run_as "$SCC" --start-server
-          echo "=== builduser sccache backend (must say s3, name: msys-cache) ==="
-          run_as "$SCC" --show-stats | grep -iE "Cache location" || true
+          runuser -w PATH -u builduser -- env PATH="$PATH" SCCACHE_DIR="$SCC_DIR" \
+            AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
+            "$SCC" --start-server >/dev/null 2>&1 || true
+          timeout 30 runuser -w PATH -u builduser -- env PATH="$PATH" SCCACHE_DIR="$SCC_DIR" \
+            "$SCC" --show-stats 2>&1 | grep -iE "Cache location" || echo "(backend check timed out / skipped)"
 
-      # TEMP DIAGNOSTIC: reproduce gmp's failing object-compile probe directly through the
-      # zigcc wrapper with sccache dist logging, so the real error is in THIS step's log
-      # (configure swallows it into config.log otherwise). Remove once the deps step is green.
-      - name: DIAG zigcc compile probe (dist)
+      # Quick sanity: a builduser compile through the wrapper must produce an object (the
+      # original failure was "no working compiler"). Non-fatal (set +e) so it never blocks.
+      - name: Sanity — builduser zigcc compile produces an object
         working-directory: /opt/msys-cross
-        env:
-          SCCACHE_LOG: debug
         run: |
           set +e
           export SCRIPTS_DIR=/opt/msys-cross/scripts PROJECT_ROOT=/opt/msys-cross
           . scripts/env-linux.sh
-          . scripts/build-common.sh        # run_as_builduser
+          . scripts/build-common.sh
           . scripts/msys-cross-common.sh && setup_zig_env
           printf 'int main(void){return 0;}\n' > /tmp/conftest.c; chmod 666 /tmp/conftest.c
-          echo "=== post-fix sanity: SCCACHE_DIR=$SCCACHE_DIR (should be builduser-owned) ==="
-          ls -ld "$SCCACHE_DIR"
-          echo "  builduser write test: $(run_as_builduser sh -c 'touch "$SCCACHE_DIR/.w" && echo YES || echo NO')"
-          echo "  builduser sees dist config: $(runuser -u builduser -- sh -c '[ -f $HOME/.config/sccache/config ] && echo YES || echo NO')"
-          echo "=== probe as BUILDUSER (the path that failed before the fix) ==="
-          run_as_builduser env SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.bu.o 2>&1 | tail -40
-          echo "rc=$?  bu.o: $([ -f /tmp/conftest.bu.o ] && echo YES || echo NO)"
-          run_as_builduser sccache --show-stats 2>&1 | grep -iE "compil|dist|error|cache (hit|miss)|fallback" || true
+          run_as_builduser "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.bu.o
+          echo "builduser compile rc=$?  object: $([ -f /tmp/conftest.bu.o ] && echo YES || echo NO)"
 
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
