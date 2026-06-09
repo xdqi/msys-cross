@@ -1,9 +1,9 @@
 #!/bin/bash
 # zig cc wrapper, optionally routed through sccache. The entire body lives in
 # zig-common.sh; this file is intentionally just a shebang + one `source`, passing the
-# mode token `cc` so zig-common.sh drives `zig cc`. It is SOURCED (not exec'd) so the
-# cc mode and arg-filtering run in this process before the wrapper hands the real compile
-# to `sccache zig cc` (see zig-common.sh) — the shape that trips sccache's is_zig gate and
-# distributes the TU. Not a symlink either: two tiny wrappers passing distinct modes
-# (cc vs c++) is the point. See zig-common.sh.
+# mode token `cc` so zig-common.sh drives `zig cc`. It is SOURCED (not exec'd) so $0
+# stays this script — sccache probes the wrapped compiler via $0, so it must be a real
+# clang-like cc, not a sub-driver. Not a symlink to zig-common.sh either: a symlink
+# would feed sccache identical bytes for the cc and c++ roles, colliding their cache
+# keys — two tiny wrappers passing different modes is the point. See zig-common.sh.
 source "$(dirname "$(readlink -f "$0")")/zig-common.sh" cc "$@"

@@ -105,6 +105,14 @@ jobs:
     container:
       image: ${{ needs.build-prep-image.outputs.image }}
     steps:
+      # Install sccache (stock mozilla build — no dist needed now; it does local compile +
+      # S3 cache). The dist-action used to provide the forked sccache on PATH; with the farm
+      # gone, install it explicitly. Sets SCCACHE_PATH.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.10.0"
+
       # Configure sccache (local compile + S3 cache; no distribution — farm removed).
       # MAKEFLAGS uses the container's own core count. The S3 vars are also written into
       # builduser's config file in the next step; setting them here too is harmless.
@@ -190,14 +198,22 @@ jobs:
           chown builduser:builduser "$cfg"
           echo "=== builduser sccache config ($cfg) ==="
           sed 's/token = .*/token = ***/; s/AWS.*=.*/&/' "$cfg"
-          # Sanity: start the daemon as builduser and confirm the backend is s3 (best-effort;
-          # the S3 stats round-trip can be slow, so cap it and don't fail the step on timeout).
-          SCC="$(command -v sccache)"
-          runuser -w PATH -u builduser -- env PATH="$PATH" SCCACHE_DIR="$SCC_DIR" \
-            AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
-            "$SCC" --start-server >/dev/null 2>&1 || true
-          timeout 30 runuser -w PATH -u builduser -- env PATH="$PATH" SCCACHE_DIR="$SCC_DIR" \
-            "$SCC" --show-stats 2>&1 | grep -iE "Cache location" || echo "(backend check timed out / skipped)"
+          # sccache binary: SCCACHE_PATH (set by the install step) or whatever is on PATH.
+          # builduser must be able to execute it — the tool-cache path is world-readable, but
+          # guard anyway.
+          SCC="${SCCACHE_PATH:-}"; [ -n "$SCC" ] || SCC="$(command -v sccache 2>/dev/null || true)"
+          if [ -z "$SCC" ]; then echo "::warning::sccache not found on PATH/SCCACHE_PATH"; fi
+          # Make SCCACHE_PATH visible to all later builduser steps (the zigcc wrapper prefers it).
+          [ -n "$SCC" ] && echo "SCCACHE_PATH=${SCC}" >> "$GITHUB_ENV"
+          # Sanity: start the daemon as builduser and confirm the backend (best-effort; the S3
+          # stats round-trip can be slow, so cap it and never fail the step here).
+          if [ -n "$SCC" ]; then
+            runuser -w PATH -u builduser -- env PATH="$PATH" SCCACHE_DIR="$SCC_DIR" \
+              AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
+              "$SCC" --start-server >/dev/null 2>&1 || true
+            timeout 30 runuser -w PATH -u builduser -- env PATH="$PATH" SCCACHE_DIR="$SCC_DIR" \
+              "$SCC" --show-stats 2>&1 | grep -iE "Cache location" || echo "(backend check timed out / skipped)"
+          fi
 
       # Quick sanity: a builduser compile through the wrapper must produce an object (the
       # original failure was "no working compiler"). Non-fatal (set +e) so it never blocks.
