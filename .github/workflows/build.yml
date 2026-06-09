@@ -185,27 +185,44 @@ jobs:
       # (b) can't see the dist config so it wouldn't distribute. Fix both: relocate the sccache
       # cache to a builduser-owned dir (override SCCACHE_DIR for all later steps) and mirror the
       # dist config + the forked sccache binary into builduser's HOME / a shared PATH.
-      - name: Make sccache usable by builduser (cache dir + dist config)
+      - name: Make sccache usable by builduser (cache dir + dist config + S3 server)
+        env:
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET }}
         run: |
           set -euo pipefail
           BU_HOME="$(getent passwd builduser | cut -d: -f6)"; BU_HOME="${BU_HOME:-/home/builduser}"
-          # 1) builduser-owned cache dir, shared by every later step (root + builduser).
+          # 1) builduser-owned cache dir (the local fallback dir; S3 is the real backend below).
           SCC_DIR=/opt/msys-cross/.sccache-cache
-          mkdir -p "$SCC_DIR"
-          chown -R builduser:builduser "$SCC_DIR"
+          mkdir -p "$SCC_DIR"; chown -R builduser:builduser "$SCC_DIR"
           echo "SCCACHE_DIR=${SCC_DIR}" >> "$GITHUB_ENV"
-          # 2) Give builduser the dist config the coordinator wrote into root's home.
+          # 2) Give builduser the dist config the coordinator wrote into root's home (so it
+          #    DISTRIBUTES). S3 caching is orthogonal and comes from the env below.
           if [ -f "$HOME/.config/sccache/config" ]; then
             install -d -o builduser -g builduser "$BU_HOME/.config/sccache"
             install -o builduser -g builduser "$HOME/.config/sccache/config" "$BU_HOME/.config/sccache/config"
             echo "dist config mirrored to ${BU_HOME}/.config/sccache/config"
           else
-            echo "::warning::no dist config at \$HOME/.config/sccache/config — deps would compile locally"
+            echo "::warning::no dist config — deps/phases would compile locally (no farm)"
           fi
-          # 3) The forked sccache binary is on root's PATH via the action ($RUNNER_TEMP/sccache-engine);
-          #    runuser resets PATH, but run_as_builduser re-asserts the caller's PATH, so builduser
-          #    inherits it. Record where it is for the diagnostics/sanity.
-          echo "sccache for builduser: $(command -v sccache)  ->  $(runuser -u builduser -- sh -c 'command -v sccache || echo MISSING')"
+          # 3) THE KEY STEP: the sccache *server* captures its cache backend (S3 vs disk) at
+          #    START time from the process env. Compiles run as builduser, so builduser's server
+          #    must be (re)started WITH the S3 env present — otherwise it serves disk-only and
+          #    nothing reaches S3 (observed: bucket stayed empty). Stop any stale server, then
+          #    start builduser's server with the full S3 env so it picks the S3 backend.
+          SCC="$(command -v sccache)"
+          run_as() { runuser -w PATH -u builduser -- env PATH="$PATH" \
+              SCCACHE_DIR="$SCC_DIR" \
+              SCCACHE_BUCKET="$SCCACHE_BUCKET" SCCACHE_ENDPOINT="$SCCACHE_ENDPOINT" \
+              SCCACHE_REGION=auto SCCACHE_S3_USE_SSL=true SCCACHE_S3_KEY_PREFIX=msys2-cross \
+              AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+              "$@"; }
+          run_as "$SCC" --stop-server >/dev/null 2>&1 || true
+          run_as "$SCC" --start-server
+          echo "=== builduser sccache backend (must say s3, name: msys-cache) ==="
+          run_as "$SCC" --show-stats | grep -iE "Cache location" || true
 
       # TEMP DIAGNOSTIC: reproduce gmp's failing object-compile probe directly through the
       # zigcc wrapper with sccache dist logging, so the real error is in THIS step's log
