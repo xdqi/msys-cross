@@ -186,16 +186,19 @@ jobs:
           SCCACHE_LOG: debug
         run: |
           set +e
+          export SCRIPTS_DIR=/opt/msys-cross/scripts PROJECT_ROOT=/opt/msys-cross
           . scripts/env-linux.sh
           . scripts/msys-cross-common.sh && setup_zig_env
           printf 'int main(void){return 0;}\n' > /tmp/conftest.c
           echo "=== which sccache / zig ==="; command -v sccache; command -v zig; sccache --version
           echo "=== sccache config ==="; cat "${HOME}/.config/sccache/config" 2>/dev/null | sed 's/token =.*/token = ***/'
-          echo "=== runuser-as-builduser zigcc -c (the gmp probe) ==="
-          chown builduser /tmp/conftest.c 2>/dev/null || true
-          run_as_builduser env SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.o 2>&1 | tail -60
+          echo "=== direct zigcc -c as ROOT (exercises the same dist path) ==="
+          SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.o 2>&1 | tail -70
           echo "rc=$?  conftest.o: $([ -f /tmp/conftest.o ] && echo YES || echo NO)"
-          echo "=== sccache stats after probe ==="; sccache --show-stats 2>&1 | grep -iE "error|dist|compil|fallback|cache" || true
+          echo "=== raw 'sccache zig cc' (bypass wrapper) ==="
+          SCCACHE_LOG=debug sccache zig cc -O2 -fPIC -target "$ZIG_TARGET" -c /tmp/conftest.c -o /tmp/conftest2.o 2>&1 | tail -40
+          echo "rc=$?  conftest2.o: $([ -f /tmp/conftest2.o ] && echo YES || echo NO)"
+          echo "=== sccache stats after probe ==="; sccache --show-stats 2>&1 | grep -iE "error|dist|compil|fallback|cache|toolchain" || true
 
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
