@@ -92,13 +92,16 @@ jobs:
   # this run's single coordinator (run-prefix = github.run_id) and self-tears-down
   # when the coordinator (the build job) exits.
   #
-  # NO `needs:` — workers must run CONCURRENTLY with `build`, not before/after it.
-  # The coordinator IS the `build` job, and workers stay up until it exits, so a
-  # `needs` edge in EITHER direction deadlocks (build waits for never-ending
-  # workers, or workers wait for a build that never starts). They rendezvous on the
-  # tailnet instead. Workers don't use the prep image either, so they don't gate on it.
+  # needs build-prep-image (same gate as `build`) so workers and the coordinator
+  # unblock together — workers don't sit idle on the tailnet during the (long) prep
+  # build, yet still come up CONCURRENTLY with `build` and rendezvous over the
+  # tailnet. The one edge that MUST NOT exist is build->workers: workers never
+  # finish (they stay up until the coordinator exits), so depending on them
+  # deadlocks. build-prep-image is a normal job that completes, so gating on it is
+  # safe. (Workers don't actually use the prep image; this edge is purely for timing.)
   # ---------------------------------------------------------------------------
   workers:
+    needs: build-prep-image
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
