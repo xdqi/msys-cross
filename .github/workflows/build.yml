@@ -97,9 +97,14 @@ jobs:
   # dist toolchain-archive, so no prep image is needed here. Each worker binds to
   # this run's single coordinator (run-prefix = github.run_id) and self-tears-down
   # when the coordinator (the build job) exits.
+  #
+  # NO `needs:` — workers must run CONCURRENTLY with `build`, not before/after it.
+  # The coordinator IS the `build` job, and workers stay up until it exits, so a
+  # `needs` edge in EITHER direction deadlocks (build waits for never-ending
+  # workers, or workers wait for a build that never starts). They rendezvous on the
+  # tailnet instead. Workers don't use the prep image either, so they don't gate on it.
   # ---------------------------------------------------------------------------
   workers:
-    needs: build-prep-image
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -123,9 +128,14 @@ jobs:
   # cache) and releases it. A SECOND coordinator can't share one worker pool
   # (workers hard-bind to one coordinator), so darwin is sequential here, not a
   # separate client.
+  #
+  # needs ONLY build-prep-image (it runs IN that container). NOT `workers`: those run
+  # concurrently and only exit once this job — their coordinator — finishes; depending
+  # on them would deadlock. By the time the prep image is built, the workers (which
+  # started at t=0 with no needs) are already up and waiting on the tailnet.
   # ---------------------------------------------------------------------------
   build:
-    needs: [build-prep-image, workers]
+    needs: build-prep-image
     runs-on: ubuntu-latest
     timeout-minutes: 360
     container:
