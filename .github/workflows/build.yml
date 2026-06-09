@@ -177,6 +177,36 @@ jobs:
           fi
           echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
 
+      # The build compiles run as `builduser` (makepkg/build_deps refuse root), but the
+      # coordinator action set SCCACHE_DIR=$HOME/.cache/sccache and wrote the dist config to
+      # $HOME/.config/sccache/config in ROOT's home. As builduser, sccache (a) can't write
+      # root's cache dir -> "failed to create directory …/preprocessor: Permission denied" ->
+      # every compile produces no object -> configure reports "no working compiler"; and
+      # (b) can't see the dist config so it wouldn't distribute. Fix both: relocate the sccache
+      # cache to a builduser-owned dir (override SCCACHE_DIR for all later steps) and mirror the
+      # dist config + the forked sccache binary into builduser's HOME / a shared PATH.
+      - name: Make sccache usable by builduser (cache dir + dist config)
+        run: |
+          set -euo pipefail
+          BU_HOME="$(getent passwd builduser | cut -d: -f6)"; BU_HOME="${BU_HOME:-/home/builduser}"
+          # 1) builduser-owned cache dir, shared by every later step (root + builduser).
+          SCC_DIR=/opt/msys-cross/.sccache-cache
+          mkdir -p "$SCC_DIR"
+          chown -R builduser:builduser "$SCC_DIR"
+          echo "SCCACHE_DIR=${SCC_DIR}" >> "$GITHUB_ENV"
+          # 2) Give builduser the dist config the coordinator wrote into root's home.
+          if [ -f "$HOME/.config/sccache/config" ]; then
+            install -d -o builduser -g builduser "$BU_HOME/.config/sccache"
+            install -o builduser -g builduser "$HOME/.config/sccache/config" "$BU_HOME/.config/sccache/config"
+            echo "dist config mirrored to ${BU_HOME}/.config/sccache/config"
+          else
+            echo "::warning::no dist config at \$HOME/.config/sccache/config — deps would compile locally"
+          fi
+          # 3) The forked sccache binary is on root's PATH via the action ($RUNNER_TEMP/sccache-engine);
+          #    runuser resets PATH, but run_as_builduser re-asserts the caller's PATH, so builduser
+          #    inherits it. Record where it is for the diagnostics/sanity.
+          echo "sccache for builduser: $(command -v sccache)  ->  $(runuser -u builduser -- sh -c 'command -v sccache || echo MISSING')"
+
       # TEMP DIAGNOSTIC: reproduce gmp's failing object-compile probe directly through the
       # zigcc wrapper with sccache dist logging, so the real error is in THIS step's log
       # (configure swallows it into config.log otherwise). Remove once the deps step is green.
@@ -191,19 +221,14 @@ jobs:
           . scripts/build-common.sh        # run_as_builduser
           . scripts/msys-cross-common.sh && setup_zig_env
           printf 'int main(void){return 0;}\n' > /tmp/conftest.c; chmod 666 /tmp/conftest.c
-          echo "=== identities / homes / cache perms ==="
-          echo "root HOME=$HOME  SCCACHE_DIR=$SCCACHE_DIR"
-          echo "builduser HOME=$(runuser -u builduser -- sh -c 'echo $HOME')"
-          ls -ld /github/home /github/home/.cache /github/home/.config 2>&1
-          ls -ld /github/home/.config/sccache 2>&1
-          echo "  can builduser write SCCACHE_DIR? $(runuser -u builduser -- sh -c 'touch '"$SCCACHE_DIR"'/.wtest 2>&1 && echo YES || echo NO')"
-          echo "  does builduser see dist config? $(runuser -u builduser -- sh -c '[ -f $HOME/.config/sccache/config ] && echo YES || echo NO')"
-          echo "=== probe as ROOT ==="
-          "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.root.o 2>&1 | tail -8
-          echo "rc=$?  root.o: $([ -f /tmp/conftest.root.o ] && echo YES || echo NO)"
-          echo "=== probe as BUILDUSER (the actual failing path) ==="
-          run_as_builduser env SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.bu.o 2>&1 | tail -50
+          echo "=== post-fix sanity: SCCACHE_DIR=$SCCACHE_DIR (should be builduser-owned) ==="
+          ls -ld "$SCCACHE_DIR"
+          echo "  builduser write test: $(run_as_builduser sh -c 'touch "$SCCACHE_DIR/.w" && echo YES || echo NO')"
+          echo "  builduser sees dist config: $(runuser -u builduser -- sh -c '[ -f $HOME/.config/sccache/config ] && echo YES || echo NO')"
+          echo "=== probe as BUILDUSER (the path that failed before the fix) ==="
+          run_as_builduser env SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.bu.o 2>&1 | tail -40
           echo "rc=$?  bu.o: $([ -f /tmp/conftest.bu.o ] && echo YES || echo NO)"
+          run_as_builduser sccache --show-stats 2>&1 | grep -iE "compil|dist|error|cache (hit|miss)|fallback" || true
 
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
