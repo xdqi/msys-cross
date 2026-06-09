@@ -92,3 +92,22 @@ The genuinely valuable parts of the migration are the **single client container*
 My recommendation: **Option 1** unless the farm's parallelism is proven to beat local
 `-j` after the reliability fixes. The S3 cache is where the real speedup is (warm-cache
 reruns are near-instant regardless of dist).
+
+## Decision executed (2026-06-10, commit 7ed5d91)
+Went with **Option 1**: the sccache-dist farm (workers job + coordinator step) was
+**removed**. The `build` job now compiles everything **locally** in the one container with
+`MAKEFLAGS=-j$(nproc)` and sccache caching to S3 (S3 backend selected via the `[cache.s3]`
+config file — the robust method; env-based selection was flaky through `runuser`). The
+workflow is now 2 jobs (`build-prep-image` + `build`); `build needs build-prep-image` only.
+
+The decisive evidence that tipped it from "slow/unreliable" to "remove": run 27219990154's
+real fatal error was `zig c++` failing to find `<memory>` (a libc++ header) in
+`gcc-16.1.0/libcody/buffer.cc` — and `zigc++ -c buffer.cc` compiles fine **locally**, so the
+header loss is purely a distributed-compile defect. Three independent dist-only failure
+classes (this, the `-target` mangling, the ~9% generic dist failures) made the farm
+untenable for this build without fork-level fixes.
+
+**To re-enable dist later:** re-add the coordinator step + `workers` matrix job (see git
+history at commit `cf6824f`/`8c5dfdc`), append the coordinator's `[dist]` config to
+builduser's sccache config, and set `MAKEFLAGS=-j$SCCACHE_J` — but only after the three
+`xdqi/sccache` fork bugs above are fixed and verified.
