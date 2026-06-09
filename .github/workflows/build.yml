@@ -1,15 +1,17 @@
-# Build the full msys2-cross toolchain repo on GitHub Actions — PARALLEL topology.
+# Build the full msys2-cross toolchain repo on GitHub Actions — single-client topology.
 #
-# Steps 0-3 (host tools, zig, MSYS2 sysroots + wine helpers, BOTH hosts' static deps) are
-# baked ONCE into a prep container image (build-prep-image job → ghcr). Then 10 cells run in
-# parallel, each `container:` that image: per host (linux x86_64, darwin arm64-macOS) a
-# [binutils→gcc] chain for each of mingw64/mingw32/ucrt64/cygwin plus a clang cell. gcc-<t>
-# needs only binutils-<t>, so each chain is self-contained in one cell — no cross-cell deps,
-# no artifact-of-binutils. Each cell uploads its *.pkg.tar.* as an artifact. Two collect jobs
-# (one per host) download all of that host's cell artifacts into PKGDEST, run Step 5-6
-# (repo-add + installer), and publish the GitHub Release — a single fan-in point per tag, so
-# no multi-writer race. Compiler cache is the shared external SeaweedFS S3 bucket (sccache),
-# so all cells/runs share one hot cache.
+# Steps 0-2 (host tools, zig, MSYS2 sysroots + wine helpers) are baked ONCE into a prep
+# container image (build-prep-image job → ghcr; buildx gha layer cache keeps unchanged
+# rebuilds fast). The `build` job runs that image and builds everything in ONE container:
+# Step 3 static deps, then per host (linux x86_64, then darwin arm64-macOS on push) the
+# binutils→gcc chains for mingw64/mingw32/ucrt64/cygwin + clang, then repo-add + installer,
+# then publishes the GitHub Release. Compiles run locally with sccache caching to the shared
+# external SeaweedFS S3 bucket, so runs share one hot cache.
+#
+# History: this replaced a 12-cell parallel topology, and briefly an sccache-dist farm
+# (15 workers). The farm was removed — distributing this toolchain build proved unreliable
+# (see docs/superpowers/specs/2026-06-10-farm-debugging-findings.md). The S3 cache + single
+# container (the valuable parts) are kept.
 name: build
 
 on:
@@ -86,50 +88,15 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------
-  # Workers: 15 ephemeral sccache-dist servers forming ONE farm for this run.
-  # Plain ubuntu-latest (Docker preinstalled) — the zig toolchain travels in the
-  # dist toolchain-archive, so no prep image is needed here. Each worker binds to
-  # this run's single coordinator (run-prefix = github.run_id) and self-tears-down
-  # when the coordinator (the build job) exits.
-  #
-  # needs build-prep-image (same gate as `build`) so workers and the coordinator
-  # unblock together — workers don't sit idle on the tailnet during the (long) prep
-  # build, yet still come up CONCURRENTLY with `build` and rendezvous over the
-  # tailnet. The one edge that MUST NOT exist is build->workers: workers never
-  # finish (they stay up until the coordinator exits), so depending on them
-  # deadlocks. build-prep-image is a normal job that completes, so gating on it is
-  # safe. (Workers don't actually use the prep image; this edge is purely for timing.)
-  # ---------------------------------------------------------------------------
-  workers:
-    needs: build-prep-image
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-    steps:
-      - name: Run sccache-dist worker ${{ matrix.idx }}
-        uses: xdqi/sccache-dist-action@v0.0.4
-        with:
-          mode: worker
-          worker-index: ${{ matrix.idx }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-
-  # ---------------------------------------------------------------------------
-  # Build (single client/coordinator container): drives the 15-worker farm.
-  # Replaces the 12-cell fan-out + the two collect jobs. Builds all linux phases
-  # serially (TUs fan out to the farm via MAKEFLAGS=-j$SCCACHE_J), assembles +
-  # releases linux; then on push builds darwin back-to-back (same farm, same S3
-  # cache) and releases it. A SECOND coordinator can't share one worker pool
-  # (workers hard-bind to one coordinator), so darwin is sequential here, not a
-  # separate client.
-  #
-  # needs ONLY build-prep-image (it runs IN that container). NOT `workers`: those run
-  # concurrently and only exit once this job — their coordinator — finishes; depending
-  # on them would deadlock. By the time the prep image is built, the workers (which
-  # started at t=0 with no needs) are already up and waiting on the tailnet.
+  # Build (single client container): builds ALL linux phases, assembles + releases,
+  # then on push builds darwin back-to-back. Compiles run LOCALLY in this container
+  # with sccache caching to S3 (cross-run reuse). The sccache-dist farm was removed:
+  # distributing this toolchain build proved unreliable (zig c++ dist compiles lose
+  # libc++ headers, clang mangles the -target triple, ~9% dist failures broke the gcc
+  # chains) and net-slower (per-TU round-trips dominate). The valuable parts of the
+  # migration — one client container + the S3 compile cache — are kept. See
+  # docs/superpowers/specs/2026-06-10-farm-debugging-findings.md for the evidence and
+  # the option to revisit dist if the fork is fixed.
   # ---------------------------------------------------------------------------
   build:
     needs: build-prep-image
@@ -138,23 +105,10 @@ jobs:
     container:
       image: ${{ needs.build-prep-image.outputs.image }}
     steps:
-      - name: Start sccache-dist coordinator (15-worker farm)
-        id: farm
-        uses: xdqi/sccache-dist-action@v0.0.4
-        with:
-          mode: coordinator
-          expected-workers: 15
-          min-workers: 8
-          wait-timeout: 600s
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-
-      # AFTER the coordinator step so the S3 client cache wins over the coordinator's
-      # local SCCACHE_DIR. Same SeaweedFS bucket the 12 cells used (verified reachable).
-      # MAKEFLAGS=-j$SCCACHE_J is THE knob that fans each package's TUs to the farm:
-      # makepkg reads -j from MAKEFLAGS, which is otherwise unset (packages would
-      # compile serially). runuser preserves exported env, so it reaches makepkg.
-      - name: Configure sccache S3 cache + farm -j
+      # Configure sccache (local compile + S3 cache; no distribution — farm removed).
+      # MAKEFLAGS uses the container's own core count. The S3 vars are also written into
+      # builduser's config file in the next step; setting them here too is harmless.
+      - name: Configure sccache S3 cache + local -j
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
@@ -170,28 +124,21 @@ jobs:
             echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}"
             echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
-            echo "MAKEFLAGS=-j${SCCACHE_J:-2}"
+            echo "MAKEFLAGS=-j$(nproc)"
           } >> "$GITHUB_ENV"
           if [ -z "${SCCACHE_BUCKET}" ]; then
-            echo "::warning::SCCACHE_S3_* secrets absent — sccache S3 cache disabled (farm still distributes)."
+            echo "::warning::SCCACHE_S3_* secrets absent — sccache S3 cache disabled (local-disk only)."
           fi
-          echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
+          echo "Local build: MAKEFLAGS=-j$(nproc)  (farm/dist disabled)"
 
-      # The build compiles run as `builduser` (makepkg/build_deps refuse root). The coordinator
-      # set SCCACHE_DIR + wrote the dist config in ROOT's home, which builduser can't write/read.
-      # Two failures resulted: (a) builduser couldn't write root's cache dir
-      # ("failed to create directory …/preprocessor: Permission denied" -> no object -> configure
-      # "no working compiler"); (b) the cache backend stayed Local-disk (S3 env didn't reliably
-      # reach the auto-started daemon through runuser), so nothing reached S3.
-      #
-      # Fix, robustly: (1) a builduser-owned cache dir (override SCCACHE_DIR for all steps);
-      # (2) select the S3 backend via the sccache CONFIG FILE ([cache.s3], read deterministically
-      # by the daemon — env-var backend selection through runuser proved flaky); AWS creds still
-      # come from env (sccache only reads creds from env), exported here so the auto-started
-      # daemon has them; (3) keep the coordinator's [dist] section in the same file so compiles
-      # still DISTRIBUTE. No manual --start-server: the first compile starts the daemon, which
-      # now reads S3 from the file + creds from env. S3 caching makes dist failures recoverable
-      # (the result is re-fetchable) and gives cross-run reuse.
+      # The build compiles run as `builduser` (makepkg/build_deps refuse root). builduser needs
+      # a writable sccache cache dir and an S3-backed sccache config. Earlier failures:
+      # (a) builduser couldn't write root's default cache dir ("failed to create directory
+      # …/preprocessor: Permission denied" -> no object -> configure "no working compiler");
+      # (b) selecting S3 via env didn't reliably reach the daemon. Fix: (1) a builduser-owned
+      # SCCACHE_DIR (overridden for all steps); (2) select S3 via the sccache CONFIG FILE
+      # ([cache.s3], read deterministically by the daemon); AWS creds from env (sccache's only
+      # source), exported for the auto-started daemon. No [dist] section -> compiles run locally.
       - name: Make sccache usable by builduser (writable cache + S3 backend via config file)
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -205,10 +152,9 @@ jobs:
           SCC_DIR=/opt/msys-cross/.sccache-cache
           mkdir -p "$SCC_DIR"; chown -R builduser:builduser "$SCC_DIR"
           echo "SCCACHE_DIR=${SCC_DIR}" >> "$GITHUB_ENV"
-          # 2+3) Build builduser's sccache config: S3 backend ([cache.s3], from file = robust) plus
-          #      the coordinator's [dist] section (so compiles still distribute). The daemon reads
-          #      this file deterministically at start; AWS creds ride the env (only source sccache
-          #      reads them from). If S3 secrets are absent, omit [cache.s3] -> local-disk cache.
+          # 2) Build builduser's sccache config: S3 backend ([cache.s3], from file = robust). The
+          #    daemon reads this file deterministically at start; AWS creds ride the env (the only
+          #    source sccache reads them from). If S3 secrets are absent, omit [cache.s3] -> disk.
           install -d -o builduser -g builduser "$BU_HOME/.config/sccache"
           cfg="$BU_HOME/.config/sccache/config"; : > "$cfg"
           if [ -n "${SCCACHE_BUCKET}" ]; then
@@ -229,13 +175,18 @@ jobs:
           else
             echo "::warning::SCCACHE_S3_* secrets absent — sccache will use local-disk cache only."
           fi
-          # Append the coordinator's [dist] section verbatim (distribution stays on).
-          if [ -f "$HOME/.config/sccache/config" ]; then
-            cat "$HOME/.config/sccache/config" >> "$cfg"
-            echo "appended [dist] section from coordinator config"
-          else
-            echo "::warning::no coordinator [dist] config — compiles will run locally (no farm)"
-          fi
+          # NOTE: distribution (the [dist] section) is intentionally NOT appended. The
+          # sccache-dist farm proved unreliable for this toolchain build — distributed
+          # compiles failed in multiple ways (verified across runs 27214110825 / 27219990154):
+          #   * zig c++ dist compiles can't find libc++ headers ('memory' file not found in
+          #     libcody/buffer.cc) — works locally, breaks only when distributed;
+          #   * clang normalizes the wrapper's valid -target x86_64-linux-gnu.2.11 to
+          #     x86_64-unknown-linux-gnu.2.11, which zig then rejects;
+          #   * ~9% of distributed compiles failed outright, breaking the gcc chains.
+          # So compile LOCALLY (in this one container) with sccache caching to S3 — the
+          # genuinely valuable parts (single client + cross-run cache) without the fragile
+          # farm. See docs/superpowers/specs/2026-06-10-farm-debugging-findings.md.
+          echo "distribution disabled — compiling locally with sccache (S3 cache); farm not used"
           chown builduser:builduser "$cfg"
           echo "=== builduser sccache config ($cfg) ==="
           sed 's/token = .*/token = ***/; s/AWS.*=.*/&/' "$cfg"
@@ -265,11 +216,11 @@ jobs:
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
       # deps are just Homebrew-bottle curls (no compile) but use the same phase.
-      - name: Build linux deps via the farm
+      - name: Build linux deps (local sccache)
         working-directory: /opt/msys-cross
         run: bash scripts/build.sh linux deps
 
-      - name: Build linux phases via the farm
+      - name: Build linux phases (local sccache)
         working-directory: /opt/msys-cross
         run: |
           set -euo pipefail
@@ -344,7 +295,7 @@ jobs:
         working-directory: /opt/msys-cross
         run: bash scripts/build.sh darwin deps
 
-      - name: Build darwin phases via the farm
+      - name: Build darwin phases (local sccache)
         if: github.event_name == 'push'
         working-directory: /opt/msys-cross
         run: |
