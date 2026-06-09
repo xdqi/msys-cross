@@ -111,3 +111,19 @@ untenable for this build without fork-level fixes.
 history at commit `cf6824f`/`8c5dfdc`), append the coordinator's `[dist]` config to
 builduser's sccache config, and set `MAKEFLAGS=-j$SCCACHE_J` — but only after the three
 `xdqi/sccache` fork bugs above are fixed and verified.
+
+## Verified outcome of the local-build run (27224119863)
+- **S3 caching WORKS** (the headline fix): stock sccache v0.10.0 + the `zigcc`-as-clang
+  wrapper (reverted to the proven `sccache <self>` form) + S3 via env/`[cache.s3]` → the
+  bucket grew from 3 to >1000 objects during one run. The fork/dist/builduser-server
+  complications were what had kept S3 disk-only; removing them fixed it.
+- **The build is reliable** (no dist failure modes): deps green, all early steps green.
+- **But the cold build is SLOW** (~70+ min for the linux phases alone). Reason: the phase
+  loop builds the four binutils→gcc chains + clang **serially** in the one container on a
+  ~4-core runner. This is the cost of "one client container" (the user's explicit choice,
+  "把12路并行再合并回来"): the old 12-cell topology built the chains in PARALLEL across
+  runners, which was faster. Warm-cache reruns are far faster (S3 cache hits), but the cold
+  build trades wall-clock for the single-container simplicity.
+  - If cold-build speed matters more than single-container: the **original 12-cell topology**
+    (parallel chain cells, each stock sccache→S3) was both fast and reliable — that's the
+    real alternative to weigh, not the farm.
