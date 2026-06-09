@@ -1,9 +1,10 @@
 # Prep image for the msys2-cross parallel CI build.
 #
-# Bakes Steps 0-3 (host tools + builduser, zig, MSYS2 sysroots + wine helpers, and BOTH
-# hosts' static deps) into one image so the 10 build cells boot ready — Step 0-3 runs ONCE
-# here, not per cell. The cells run `build.sh <linux|darwin> chain:<t>` / `clang`; the two
-# collect jobs run `build.sh <host> assemble`.
+# Bakes Steps 0-2 (host tools + builduser, zig, MSYS2 sysroots + wine helpers) into one image
+# so the build coordinator container boots ready. The static deps (Step 3) are NOT baked here
+# — the build job runs `build.sh <host> deps` after the sccache-dist coordinator is up, so the
+# zigcc-routed linux deps compile distributes across the farm. The build job then runs
+# `build.sh <host> others|chain:<t>|clang|assemble` against this image.
 #
 # Built+pushed by the build-prep-image job (docker/build-push-action, buildx) to
 # ghcr.io/<owner>/msys2-cross-prep. Internally cached via buildx layer cache so an unchanged
@@ -35,21 +36,21 @@ COPY . .
 RUN git config --global --add safe.directory /opt/msys-cross && \
     git config --global --add safe.directory '*'
 
-# Run prep for BOTH hosts. Each `build.sh <host> prep` does Steps 0-3; Step 0's pacman is a
-# near-noop here (tools already installed above), and the heavy work is zig + sysroots + that
-# host's deps. The outputs land under build/ and deps/ inside the image.
-#   linux  deps -> deps/install-x86_64-linux-gnu.2.11 (built from source)
-#   darwin deps -> deps/install-aarch64-macos.11.0    (Homebrew bottles via curl)
+# Run prep for BOTH hosts. Each `build.sh <host> prep` now does Steps 0-2 ONLY (host tools +
+# zig + MSYS2 sysroots/wine helpers); Step 0's pacman is a near-noop here (tools already
+# installed above). The static deps are NOT built here anymore — that is the `deps` phase,
+# run in the build job so the (zigcc-routed) linux deps compile distributes across the
+# sccache-dist farm instead of compiling single-threaded in this Docker build. Outputs land
+# under build/ inside the image; deps/install-* is produced later by the build job.
 # Both hosts share build/bootstrap-prefix (MSYS2 sysroots + wine specs/as/ld/objdump helpers).
 RUN bash scripts/build.sh linux  prep && \
     bash scripts/build.sh darwin prep && \
-    chown -R builduser:builduser build deps 2>/dev/null || true
+    chown -R builduser:builduser build 2>/dev/null || true
 
 # Slim the image: prepare-build-sysroot's `pacman -Sy --root=<sysroot>` downloads the 4
 # sysroots' packages into the HOST cache (pacman.conf has no CacheDir; --root doesn't rebase
-# it), and build_deps leaves cached source tarballs under build/.deps-src. Neither is needed
-# at cell runtime (cells need only build/bootstrap-prefix + deps/install-*). Drop them in this
-# same layer so they never get committed.
+# it). Not needed at runtime (the build job needs only build/bootstrap-prefix + the deps it
+# builds itself). Drop it in this same layer so it never gets committed.
 RUN rm -rf /var/cache/pacman/pkg/* build/.deps-src build/sources 2>/dev/null || true
 
 # Cells will `cd /opt/msys-cross` and run their phase; the workflow sets the working dir.

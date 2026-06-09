@@ -9,6 +9,32 @@
 # to every makepkg invocation (the darwin pass uses makepkg-darwin-arm64.conf; the
 # linux pass leaves it unset → unchanged behavior).
 
+# ---- Log grouping (GitHub Actions foldable sections; plain banner locally) ----
+# Under GitHub Actions, `::group::TITLE` / `::endgroup::` make the enclosed log a
+# collapsible section in the UI. Locally (no $GITHUB_ACTIONS) we fall back to the
+# existing `===== TITLE =====` banner so interactive output is unchanged. Keep these
+# cheap and side-effect-free so every caller can sprinkle them freely.
+gha_group() {
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then printf '::group::%s\n' "$*"
+    else echo "===== $* ====="; fi
+}
+gha_endgroup() {
+    [ -n "${GITHUB_ACTIONS:-}" ] && printf '::endgroup::\n'
+    return 0
+}
+# run_grouped "TITLE" cmd args...  — open a group, run the command, ALWAYS close the
+# group (even if the command fails), then propagate the command's exit status. Use
+# this around any noisy block so the group never leaks open on error. set -e safe:
+# the status is captured, not allowed to abort before endgroup.
+run_grouped() {
+    local _title="$1"; shift
+    gha_group "$_title"
+    local _rc=0
+    "$@" || _rc=$?
+    gha_endgroup
+    return "$_rc"
+}
+
 # The whole build runs as one unprivileged user (so the sccache server is single-uid
 # and never hands another uid root-owned objects). Anything writable is chown'd to
 # builduser before use.
@@ -70,9 +96,9 @@ build_pkg() {
     fi
 
     echo ""
-    echo "===== Building $pkg_dir ====="
     cd "$PROJECT_ROOT/pkgs/$pkg_dir"
-    run_as_builduser makepkg "${cfg_args[@]}" $makepkg_args
+    # Group the (noisy) makepkg compile under one foldable section per package.
+    run_grouped "Building $pkg_dir" run_as_builduser makepkg "${cfg_args[@]}" $makepkg_args
 
     # Reclaim this package's scratch tree now that its .pkg.tar.* is in PKGDEST.
     # Each package has an isolated BUILDDIR and no later package reads a prior

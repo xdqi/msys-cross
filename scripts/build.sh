@@ -30,7 +30,15 @@ esac
 # Phase selector — lets CI split the monolithic build across parallel runners while
 # keeping `build.sh <target>` (= `all`) working verbatim for local dev / fallback.
 #   all (default)        Steps 0-6 in one process (the original behaviour)
-#   prep                 Steps 0-3 only (baked into the prep container image)
+#   prep                 Steps 0-2 only (host tools + zig + MSYS2 sysroots/wine helpers).
+#                        Baked into the prep container image. Does NOT build the static
+#                        deps — that is the separate `deps` phase, so the (zigcc-routed)
+#                        deps compile can run on the sccache-dist farm instead of in Docker.
+#   deps                 Step 3 only: build/provision the static deps into
+#                        deps/install-$ZIG_TARGET (linux: build_deps.sh, compiled via zigcc
+#                        -> distributes across the farm; darwin: build-deps-darwin.sh, curls
+#                        Homebrew bottles). Run in the build job AFTER the coordinator is up.
+#                        Assumes `prep` already ran (needs zig + sysroots present).
 #   others               The foundation packages only: filesystem, ca-certificates, pacman,
 #                        pkgconfig. Their own CI cell so the chain/clang cells don't each
 #                        rebuild them. binutils/gcc/clang don't need them in INSTALL_PREFIX
@@ -40,19 +48,20 @@ esac
 #                        Assumes prep already ran. Does NOT build the foundation (see `others`).
 #   clang                Step 4b only. Assumes prep already ran.
 #   assemble             Steps 5-6 (repo-add db + installer) over a populated PKGDEST.
-# A chain/clang/others/assemble phase expects the prep outputs (zig, sysroots, deps) present —
-# in CI they come from the prep image; locally, run `build.sh <target> prep` first.
+# A deps/chain/clang/others/assemble phase expects the prep outputs (zig, sysroots) present —
+# in CI they come from the prep image; locally, run `build.sh <target> prep` first. The
+# deps phase additionally produces deps/install-$ZIG_TARGET that chain/clang consume.
 PHASE="${2:-all}"
 CHAIN_TARGET=""
 case "$PHASE" in
-    all|prep|others|clang|assemble) ;;
+    all|prep|deps|others|clang|assemble) ;;
     chain:*) CHAIN_TARGET="${PHASE#chain:}"
         case "$CHAIN_TARGET" in
             mingw64|mingw32|ucrt64|cygwin) ;;
             *) echo "error: chain target must be mingw64|mingw32|ucrt64|cygwin (got '$CHAIN_TARGET')" >&2; exit 1 ;;
         esac ;;
     *)
-        echo "error: unknown phase '$PHASE' (expected: all | prep | others | chain:<target> | clang | assemble)" >&2
+        echo "error: unknown phase '$PHASE' (expected: all | prep | deps | others | chain:<target> | clang | assemble)" >&2
         exit 1
         ;;
 esac
@@ -136,10 +145,11 @@ echo
 export PATH="$INSTALL_PREFIX/bin:$PATH"
 
 # Per-phase gates. `all` runs everything; the split phases run only their slice.
-_do_prep=false; _do_others=false; _do_chain=false; _do_clang=false; _do_assemble=false
+_do_prep=false; _do_deps=false; _do_others=false; _do_chain=false; _do_clang=false; _do_assemble=false
 case "$PHASE" in
-    all)      _do_prep=true; _do_others=true; _do_chain=true; _do_clang=true; _do_assemble=true ;;
+    all)      _do_prep=true; _do_deps=true; _do_others=true; _do_chain=true; _do_clang=true; _do_assemble=true ;;
     prep)     _do_prep=true ;;
+    deps)     _do_deps=true ;;
     others)   _do_others=true ;;
     chain:*)  _do_chain=true ;;
     clang)    _do_clang=true ;;
@@ -192,24 +202,32 @@ bash "$SCRIPTS_DIR/prepare-build-sysroot.sh"
 if [ -d "$BOOTSTRAP_PREFIX/specs-helper" ]; then
     chown -R builduser:builduser "$BOOTSTRAP_PREFIX/specs-helper" 2>/dev/null || true
 fi
+fi  # _do_prep (Steps 1-2)
 
 # ---- Step 3: Build / provision static deps ----
+# Its own phase (`deps`) so the linux build_deps.sh compile (routed through zigcc) runs on
+# the sccache-dist farm in the build job, instead of single-threaded in the prep Docker build.
+# darwin just curls Homebrew bottles here (no compile). Needs Steps 1-2 outputs (zig+sysroots)
+# already present — in CI from the prep image, locally from a prior `prep` run.
+if $_do_deps; then
 echo ""
-echo "===== Step 3: Build static dependencies ====="
 if [ "$TARGET" = darwin ]; then
     # arm64 static deps — STOLEN from Homebrew bottles, not cross-built. gmp/mpfr/mpc/isl
     # don't cross-compile cleanly on zig's macOS SDK (asm/configure host probes); Homebrew
     # already ships correct arm64 Mach-O .a, so build-deps-darwin.sh fetches those
     # (+ zlib/zstd) into deps/install-$ZIG_TARGET with the same layout build_deps.sh
     # produces. Runs as root here (just curl+bsdtar); chown after so builduser can read.
-    bash "$SCRIPTS_DIR/build-deps-darwin.sh"
+    run_grouped "Step 3: Fetch static dependencies (darwin bottles)" \
+        bash "$SCRIPTS_DIR/build-deps-darwin.sh"
     chown -R builduser:builduser "$DEPS_INSTALL" 2>/dev/null || true
 else
     # Built as builduser (see run_as_builduser) so the sccache server is the same uid
-    # as the gcc/binutils phase.
-    run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
+    # as the gcc/binutils phase. The compile (gmp/mpfr/mpc/isl/zlib/zstd via zigcc)
+    # distributes across the farm; group it under one foldable section.
+    run_grouped "Step 3: Build static dependencies (linux, via farm)" \
+        run_as_builduser bash "$SCRIPTS_DIR/build_deps.sh"
 fi
-fi  # _do_prep (Steps 1-3)
+fi  # _do_deps (Step 3)
 
 # build_pkg / install_local live in build-common.sh (sourced above, every phase).
 
