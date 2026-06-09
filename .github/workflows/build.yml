@@ -183,6 +183,13 @@ jobs:
           fi
           echo "Farm: SCCACHE_J=${SCCACHE_J} workers=${SCCACHE_WORKERS_ONLINE}"
 
+      # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
+      # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
+      # deps are just Homebrew-bottle curls (no compile) but use the same phase.
+      - name: Build linux deps via the farm
+        working-directory: /opt/msys-cross
+        run: bash scripts/build.sh linux deps
+
       - name: Build linux phases via the farm
         working-directory: /opt/msys-cross
         run: |
@@ -252,6 +259,12 @@ jobs:
             --target "${GITHUB_SHA}"
 
       # ---- darwin: push-only, back-to-back in the SAME coordinator container ----
+      # darwin deps = Homebrew-bottle curls (no compile); still its own phase for symmetry.
+      - name: Build darwin deps
+        if: github.event_name == 'push'
+        working-directory: /opt/msys-cross
+        run: bash scripts/build.sh darwin deps
+
       - name: Build darwin phases via the farm
         if: github.event_name == 'push'
         working-directory: /opt/msys-cross
