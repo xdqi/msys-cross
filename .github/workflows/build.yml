@@ -188,17 +188,22 @@ jobs:
           set +e
           export SCRIPTS_DIR=/opt/msys-cross/scripts PROJECT_ROOT=/opt/msys-cross
           . scripts/env-linux.sh
+          . scripts/build-common.sh        # run_as_builduser
           . scripts/msys-cross-common.sh && setup_zig_env
-          printf 'int main(void){return 0;}\n' > /tmp/conftest.c
-          echo "=== which sccache / zig ==="; command -v sccache; command -v zig; sccache --version
-          echo "=== sccache config ==="; cat "${HOME}/.config/sccache/config" 2>/dev/null | sed 's/token =.*/token = ***/'
-          echo "=== direct zigcc -c as ROOT (exercises the same dist path) ==="
-          SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.o 2>&1 | tail -70
-          echo "rc=$?  conftest.o: $([ -f /tmp/conftest.o ] && echo YES || echo NO)"
-          echo "=== raw 'sccache zig cc' (bypass wrapper) ==="
-          SCCACHE_LOG=debug sccache zig cc -O2 -fPIC -target "$ZIG_TARGET" -c /tmp/conftest.c -o /tmp/conftest2.o 2>&1 | tail -40
-          echo "rc=$?  conftest2.o: $([ -f /tmp/conftest2.o ] && echo YES || echo NO)"
-          echo "=== sccache stats after probe ==="; sccache --show-stats 2>&1 | grep -iE "error|dist|compil|fallback|cache|toolchain" || true
+          printf 'int main(void){return 0;}\n' > /tmp/conftest.c; chmod 666 /tmp/conftest.c
+          echo "=== identities / homes / cache perms ==="
+          echo "root HOME=$HOME  SCCACHE_DIR=$SCCACHE_DIR"
+          echo "builduser HOME=$(runuser -u builduser -- sh -c 'echo $HOME')"
+          ls -ld /github/home /github/home/.cache /github/home/.config 2>&1
+          ls -ld /github/home/.config/sccache 2>&1
+          echo "  can builduser write SCCACHE_DIR? $(runuser -u builduser -- sh -c 'touch '"$SCCACHE_DIR"'/.wtest 2>&1 && echo YES || echo NO')"
+          echo "  does builduser see dist config? $(runuser -u builduser -- sh -c '[ -f $HOME/.config/sccache/config ] && echo YES || echo NO')"
+          echo "=== probe as ROOT ==="
+          "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.root.o 2>&1 | tail -8
+          echo "rc=$?  root.o: $([ -f /tmp/conftest.root.o ] && echo YES || echo NO)"
+          echo "=== probe as BUILDUSER (the actual failing path) ==="
+          run_as_builduser env SCCACHE_LOG=debug "$CC" -O2 -fPIC -c /tmp/conftest.c -o /tmp/conftest.bu.o 2>&1 | tail -50
+          echo "rc=$?  bu.o: $([ -f /tmp/conftest.bu.o ] && echo YES || echo NO)"
 
       # Static deps (Step 3) run here, NOT in the prep image, so the zigcc-routed linux
       # deps compile (gmp/mpfr/mpc/isl/zlib/zstd) distributes across the farm. darwin's
