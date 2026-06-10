@@ -109,7 +109,13 @@ jobs:
   workers:
     needs: build-prep-image
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # MUST cover the build job's full lifetime (linux phases + release + darwin
+    # phases = its 360), not just the linux half: at 180 all 15 workers were
+    # job-timeout-killed mid-darwin (run 27257400910 attempt 3, died at exactly
+    # +3h) and darwin fell back to local -j60 on the 4-core coordinator. The
+    # guard loop ("coordinator gone 5x") exits workers as soon as the build job
+    # ends, so this is a backstop, not idle runner burn.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
