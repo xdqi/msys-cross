@@ -351,11 +351,23 @@ jobs:
           for f in repo/*.pkg.tar.* repo/msys-cross.db.tar.gz repo/msys-cross.files.tar.gz repo/bootstrap.tar.xz; do
             [ -f "$f" ] && assets+=("$f")
           done
-          echo "Uploading ${#assets[@]} assets"
-          gh release create "$tag" "${assets[@]}" \
+          # Create the release bare, then upload assets separately WITH RETRIES:
+          # bundling 36 assets into `gh release create` is neither retried nor
+          # idempotent — one transient uploads.github.com 401/5xx kills the
+          # step with a half-populated release (run 27282529779 died exactly
+          # so, 71min in, right past the GITHUB_TOKEN's 1h refresh boundary).
+          # `upload --clobber` is safe to re-run, so retry the whole batch.
+          gh release create "$tag" \
             --title "$tag" \
             --notes "Automated build from ${GITHUB_SHA}. Consumed by msys-mirror; pin via /archive/${tag}/." \
             --target "${GITHUB_SHA}"
+          echo "Uploading ${#assets[@]} assets"
+          for attempt in 1 2 3 4; do
+            gh release upload "$tag" "${assets[@]}" --clobber && break
+            [ "$attempt" = 4 ] && { echo "asset upload failed after 4 attempts"; exit 1; }
+            echo "asset upload failed (attempt $attempt); retrying in 20s"
+            sleep 20
+          done
 
       # ---- darwin: push-only, back-to-back in the SAME coordinator container ----
       # darwin deps = Homebrew-bottle curls (no compile); still its own phase for symmetry.
@@ -415,8 +427,15 @@ jobs:
           for f in repo-darwin/*.pkg.tar.* repo-darwin/msys-cross-darwin.db.tar.gz repo-darwin/msys-cross-darwin.files.tar.gz repo-darwin/bootstrap-darwin.tar.xz; do
             [ -f "$f" ] && assets+=("$f")
           done
-          echo "Uploading ${#assets[@]} assets"
-          gh release create "$tag" "${assets[@]}" \
+          # Same retry/idempotency shape as the linux publish (see above).
+          gh release create "$tag" \
             --title "$tag" \
             --notes "Automated darwin (arm64 macOS host) build from ${GITHUB_SHA}." \
             --target "${GITHUB_SHA}"
+          echo "Uploading ${#assets[@]} assets"
+          for attempt in 1 2 3 4; do
+            gh release upload "$tag" "${assets[@]}" --clobber && break
+            [ "$attempt" = 4 ] && { echo "asset upload failed after 4 attempts"; exit 1; }
+            echo "asset upload failed (attempt $attempt); retrying in 20s"
+            sleep 20
+          done
