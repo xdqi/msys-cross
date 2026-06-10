@@ -95,7 +95,7 @@ jobs:
   # Workers: 15 ephemeral sccache-dist servers forming ONE farm for this run.
   # Plain ubuntu-latest (Docker preinstalled) — the zig toolchain travels in the
   # dist toolchain-archive, so no prep image is needed here. Each worker binds to
-  # this run's single coordinator (run-prefix = github.run_id) and self-tears-down
+  # this run's single coordinator (run-prefix = run_id-run_attempt) and self-tears-down
   # when the coordinator (the build job) exits.
   #
   # needs build-prep-image (same gate as `build`) so workers and the coordinator
@@ -120,6 +120,12 @@ jobs:
         with:
           mode: worker
           worker-index: ${{ matrix.idx }}
+          # Include the attempt: re-runs reuse the run_id, and within the
+          # tailnet's ephemeral-node cleanup window the stale same-named nodes
+          # from the previous attempt shadow the new ones (workers then bridge
+          # to a dead coordinator and the farm never forms — attempt 3 of run
+          # 27247179976).
+          run-prefix: ${{ github.run_id }}-${{ github.run_attempt }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
@@ -152,6 +158,8 @@ jobs:
           expected-workers: 15
           min-workers: 8
           wait-timeout: 600s
+          # Keep in sync with the workers' run-prefix (attempt-suffixed).
+          run-prefix: ${{ github.run_id }}-${{ github.run_attempt }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
