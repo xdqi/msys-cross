@@ -55,7 +55,13 @@ DEPS_URL[gmp-${GMP_VER}.tar.xz]="https://gmplib.org/download/gmp/gmp-${GMP_VER}.
 DEPS_URL[mpfr-${MPFR_VER}.tar.xz]="https://www.mpfr.org/mpfr-${MPFR_VER}/mpfr-${MPFR_VER}.tar.xz https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"
 DEPS_URL[mpc-${MPC_VER}.tar.gz]="https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz https://www.multiprecision.org/downloads/mpc-${MPC_VER}.tar.gz"
 DEPS_URL[isl-${ISL_VER}.tar.xz]="https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz https://gcc.gnu.org/pub/gcc/infrastructure/isl-${ISL_VER}.tar.bz2"
-DEPS_URL[zlib-${ZLIB_VER}.tar.xz]="https://zlib.net/zlib-${ZLIB_VER}.tar.xz https://www.zlib.net/fossils/zlib-${ZLIB_VER}.tar.xz https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.xz"
+# zlib: GitHub release first — content-addressed per tag, always serves the exact
+# version. The zlib.net top-level path is intentionally NOT used: it rolls to whatever
+# is "current" and intermittently answers HTTP 200 with an HTML index page instead of
+# the tarball, which curl -f accepts and only blows up later at extract time. Keep the
+# zlib.net fossils path as a last-ditch fallback (populated once a version ages out);
+# validate_archive() below rejects any HTML-200 body regardless of which mirror served it.
+DEPS_URL[zlib-${ZLIB_VER}.tar.xz]="https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.xz https://www.zlib.net/fossils/zlib-${ZLIB_VER}.tar.xz"
 DEPS_URL[zstd-${ZSTD_VER}.tar.gz]="https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz"
 
 # Make a writable working copy of source tarballs
@@ -70,6 +76,22 @@ fetch_url() {
     curl -fL --connect-timeout 20 --max-time 600 \
         --retry 3 --retry-delay 3 --retry-all-errors \
         -o "$dest" "$url"
+}
+
+# Verify a downloaded file really is the compressed archive its name claims. A mirror
+# can answer HTTP 200 with an HTML error/index page (zlib.net has done this repeatedly),
+# which curl -f happily accepts; without this check that garbage passes as a tarball and
+# only dies at `tar xf` time, aborting the whole build instead of failing over to the
+# next mirror. Match magic bytes against the extension.
+validate_archive() {
+    local f="$1" magic
+    magic=$(head -c6 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$f" in
+        *.tar.xz|*.txz)   [[ "$magic" == fd377a585a* ]] ;;   # xz:   FD 37 7A 58 5A 00
+        *.tar.gz|*.tgz)   [[ "$magic" == 1f8b* ]] ;;         # gzip: 1F 8B
+        *.tar.bz2|*.tbz2) [[ "$magic" == 425a68* ]] ;;       # bzip2: 'BZh'
+        *)                return 0 ;;                         # unknown ext: skip check
+    esac
 }
 
 get_tarball() {
@@ -87,11 +109,11 @@ get_tarball() {
     local url
     for url in $urls; do
         echo "  Downloading $fn from $url ..."
-        if fetch_url "$url" "$WORK_DEPS/$fn.part"; then
+        if fetch_url "$url" "$WORK_DEPS/$fn.part" && validate_archive "$WORK_DEPS/$fn.part"; then
             mv "$WORK_DEPS/$fn.part" "$WORK_DEPS/$fn"
             return 0
         fi
-        echo "  ... failed, trying next mirror"
+        echo "  ... failed or not a valid archive, trying next mirror"
         rm -f "$WORK_DEPS/$fn.part"
     done
     echo "ERROR: all mirrors failed for $fn"
