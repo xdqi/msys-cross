@@ -4,8 +4,16 @@ source "$_startdir/../../scripts/msys-cross-common.sh"
 inherit_msys2 "mingw-w64-cross-binutils"
 
 # ---- Add our NT weak externals patches ----
+# 0001 (tavip's "Fix linker error when using NT weak externals") was DROPPED at
+# binutils 2.47: upstream now implements PE COFF weak externals natively and more
+# completely (the IS_WEAK_EXTERNAL macro + is_pe_weak block in bfd/cofflink.c, plus
+# a "two weak externals meet" resolver coff_link_add_symbols never had). Forcing 0001
+# on top corrupts that logic (its Hunk #3 no longer applies). The remaining three are
+# independent of the linker fix and still apply cleanly:
+#   0002 — relocate aux tagndx for `ld -r` + gas type propagation (region untouched by 2.47)
+#   0003 — coff_nt_weak_to_local() for `objcopy -G` weak->local (not in upstream)
+#   0004 — our name-based .weak. resolution fix on top of 0003 (not in upstream)
 _our_binutils_patches=(
-    0001-Fix-linker-error-when-using-NT-weak-externals.patch
     0002-Relocate-aux-entries-for-NT-weak-externals.patch
     0003-Convert-NT-weak-externals-to-locals.patch
     0004-Resolve-weak-externals-by-name-rather-than-stale-tag.patch
