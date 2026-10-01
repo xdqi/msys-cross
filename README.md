@@ -70,14 +70,14 @@ archive tag — see [msys-mirror](msys-mirror/README.md).
 
 | Target triple | Runtime | Compiler |
 |---|---|---|
-| `x86_64-w64-mingw32` | msvcrt | GCC 16.1.0 |
-| `i686-w64-mingw32` | msvcrt | GCC 16.1.0 |
-| `x86_64-w64-mingw32ucrt` | UCRT | GCC 16.1.0 |
-| `x86_64-pc-cygwin` | cygwin | GCC 15.2.0 |
+| `x86_64-w64-mingw32` | msvcrt | GCC 16.2.0 |
+| `i686-w64-mingw32` | msvcrt | GCC 16.2.0 |
+| `x86_64-w64-mingw32ucrt` | UCRT | GCC 16.2.0 |
+| `x86_64-pc-cygwin` | cygwin | GCC 15.3.0 |
 | `x86_64-w64-mingw32` (clang64) | UCRT | host clang/lld wrapper |
 | `aarch64-w64-mingw32` (clangarm64) | UCRT | host clang/lld wrapper |
 
-binutils 2.46.0 across all targets. The compilers are built with `zig cc`
+binutils 2.47 across all targets. The compilers are built with `zig cc`
 against a glibc 2.11 ABI (so they run on old and new Linux alike), and the
 Windows runtimes (headers, CRT, winpthreads, …) come straight from the official
 MSYS2 repositories rather than being rebuilt.
