@@ -131,6 +131,14 @@ export JOBS="${JOBS:-$(nproc)}"
 
 mkdir -p "$PKGDEST" "$SRCDEST" "$LOGDEST" "$DEPS_INSTALL" "$INSTALL_PREFIX" "$PROJECT_ROOT/build"
 
+# A plain `makepkg` (the linux pass passes no --config) reads /etc/makepkg.conf.d/,
+# so link the mirror-fallback download agent in there; the --config files source
+# it themselves. Needs root, which the container build has; elsewhere makepkg
+# just keeps the stock agent.
+if [ "$(id -u)" = 0 ] && [ -d /etc/makepkg.conf.d ]; then
+    ln -sfn "$SCRIPTS_DIR/makepkg-mirrors.conf" /etc/makepkg.conf.d/msys-cross-mirrors.conf
+fi
+
 echo "=== msys2-cross build (target=$TARGET) ==="
 echo "PKGDEST:    $PKGDEST"
 echo "BOOTSTRAP:  $BOOTSTRAP_PREFIX"
