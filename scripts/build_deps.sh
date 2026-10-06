@@ -49,11 +49,14 @@ mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/bin"
 # ---- URL map for source tarballs ----
 # Each entry may list multiple space-separated URLs; they are tried in order.
 # Primary upstreams can be flaky from CI (gmplib.org has timed out from GitHub
-# runners), so a GNU/GCC-infrastructure mirror is listed as a fallback.
+# runners), so the GNU ones fall back to the kernel.org GNU mirror, which comes
+# before ftp.gnu.org: on 2026-10-06 gmplib.org and ftp.gnu.org both timed out
+# while mirrors.kernel.org served. GCC's infrastructure/ directory is no
+# fallback for gmp: it only carries 6.2.1.
 declare -A DEPS_URL
-DEPS_URL[gmp-${GMP_VER}.tar.xz]="https://gmplib.org/download/gmp/gmp-${GMP_VER}.tar.xz https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz https://gcc.gnu.org/pub/gcc/infrastructure/gmp-${GMP_VER}.tar.xz"
-DEPS_URL[mpfr-${MPFR_VER}.tar.xz]="https://www.mpfr.org/mpfr-${MPFR_VER}/mpfr-${MPFR_VER}.tar.xz https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"
-DEPS_URL[mpc-${MPC_VER}.tar.gz]="https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz https://www.multiprecision.org/downloads/mpc-${MPC_VER}.tar.gz"
+DEPS_URL[gmp-${GMP_VER}.tar.xz]="https://gmplib.org/download/gmp/gmp-${GMP_VER}.tar.xz https://mirrors.kernel.org/gnu/gmp/gmp-${GMP_VER}.tar.xz https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VER}.tar.xz"
+DEPS_URL[mpfr-${MPFR_VER}.tar.xz]="https://www.mpfr.org/mpfr-${MPFR_VER}/mpfr-${MPFR_VER}.tar.xz https://mirrors.kernel.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz"
+DEPS_URL[mpc-${MPC_VER}.tar.gz]="https://mirrors.kernel.org/gnu/mpc/mpc-${MPC_VER}.tar.gz https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VER}.tar.gz https://www.multiprecision.org/downloads/mpc-${MPC_VER}.tar.gz"
 DEPS_URL[isl-${ISL_VER}.tar.xz]="https://libisl.sourceforge.io/isl-${ISL_VER}.tar.xz https://gcc.gnu.org/pub/gcc/infrastructure/isl-${ISL_VER}.tar.bz2"
 # zlib: GitHub release first — content-addressed per tag, always serves the exact
 # version. The zlib.net top-level path is intentionally NOT used: it rolls to whatever
